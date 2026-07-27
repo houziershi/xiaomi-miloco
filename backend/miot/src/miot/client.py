@@ -36,6 +36,7 @@ from .types import (
     MIoTCameraInfo,
     MIoTCameraStatus,
     MIoTDeviceBindEvent,
+    MIoTDeviceEvent,
     MIoTDeviceInfo,
     MIoTDeviceStateEvent,
     MIoTHomeInfo,

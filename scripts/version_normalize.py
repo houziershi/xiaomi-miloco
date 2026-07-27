@@ -53,7 +53,7 @@ def to_pep440(raw: str) -> str:
 # 在 semver 里排序 < 正式版；本项目 npm 包（web 不发布、openclaw 走本地 tgz 装）不依赖 npm 版本
 # 排序，可接受。仅用于本地 dev；发布走 to_npm（raw CalVer 原样）。
 _PEP_FULL = re.compile(
-    r"^(?P<rel>\d+\.\d+\.\d+)"
+    r"^(?P<rel>\d+\.\d+(?:\.\d+)?)"
     r"(?P<pre>(?:a|b|rc)\d+)?"
     r"(?P<post>\.post\d+)?"
     r"(?P<dev>\.dev\d+)?"
@@ -72,11 +72,23 @@ def pep440_to_semver(pep: str) -> str:
         ids.append(m.group("post")[1:])  # 去掉前导 '.'
     if m.group("dev"):
         ids.append(m.group("dev")[1:])
-    sem = m.group("rel")
+    rel = m.group("rel")
+    # semver 要求三段 (major.minor.patch)，如果只有两段则补充 .0
+    parts = rel.split(".")
+    if len(parts) == 2:
+        rel = rel + ".0"
+    sem = rel
     if ids:
-        sem += "-" + ".".join(ids)
+        # semver prerelease 标识符用 '.' 分隔，每个标识符只能包含 [0-9A-Za-z-]
+        # 将 post1 和 dev2 用 '.' 连接，形成合法的 prerelease
+        prerelease = ".".join(ids)
+        sem += "-" + prerelease
     if m.group("local"):
-        sem += "+" + m.group("local")
+        # semver build metadata 只能包含 [0-9A-Za-z-]，去掉 'g' 前缀（git hash）
+        local = m.group("local")
+        if local.startswith("g"):
+            local = local[1:]
+        sem += "+" + local
     return sem
 
 

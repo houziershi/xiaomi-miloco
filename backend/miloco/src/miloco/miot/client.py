@@ -1255,7 +1255,7 @@ class MiotProxy:
             # Check if it's in the camera allowlist
             try:
                 camera_extra_info = await self._get_camera_extra_info()
-                if not is_camera_model(model, camera_extra_info):
+                if not await is_camera_model(model, camera_extra_info):
                     continue
             except Exception as e:
                 logger.debug("Failed to check camera model for %s: %s", did, e)
@@ -1342,18 +1342,8 @@ class MiotProxy:
 
     async def _get_camera_extra_info(self):
         """Get camera extra info from the config file."""
-        from miot.camera import MIoTCameraExtraInfo
-        from pathlib import Path
-        import yaml
-
-        config_path = Path(__file__).parent.parent.parent.parent / "miot" / "configs" / "camera_extra_info.yaml"
-        if not config_path.exists():
-            return MIoTCameraExtraInfo()
-
-        with open(config_path) as f:
-            data = yaml.safe_load(f)
-
-        return MIoTCameraExtraInfo(**data)
+        from miot.camera import MIoTCameraExtraInfo, get_camera_extra_info
+        return await get_camera_extra_info()
 
     def get_mips_status(self) -> dict:
         """Snapshot of cloud-MQTT connection and user-level subscribe status.

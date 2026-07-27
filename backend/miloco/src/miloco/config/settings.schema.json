@@ -127,6 +127,28 @@
           "description": "相同通知文案在此窗口（秒）内只发一次；<=0 = 关闭去重"
         }
       }
+    },
+    "lock_camera": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "门锁摄像头配置",
+      "properties": {
+        "recording_duration": {
+          "type": "integer",
+          "default": 10,
+          "description": "门铃触发后录制时长（秒）"
+        },
+        "auto_disconnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "录制结束后是否自动断开连接以节省电量"
+        },
+        "max_concurrent_recordings": {
+          "type": "integer",
+          "default": 3,
+          "description": "最大同时录制的门锁摄像头数量"
+        }
+      }
     }
   },
   "required": ["debug", "server", "agent", "model"]

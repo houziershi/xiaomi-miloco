@@ -64,6 +64,12 @@ camera:
   frame_interval: 1000   # 帧采集间隔（毫秒）
   max_cache_images: 6    # 最大缓存图像数量
 
+# 门锁摄像头配置
+lock_camera:
+  recording_duration: 10        # 门铃触发后录制时长（秒）
+  auto_disconnect: true         # 录制结束后是否自动断开连接以节省电量
+  max_concurrent_recordings: 3  # 最大同时录制的门锁摄像头数量
+
 # 规则引擎相关配置
 rule:
   log_ttl: 30                  # 天

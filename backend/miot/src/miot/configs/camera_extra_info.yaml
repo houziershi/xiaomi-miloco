@@ -3,6 +3,7 @@ allow_classes:
   - camera
   - wifispeaker
   - controller
+  - lock
 
 extra_info:
   chuangmi.camera.068ac1:
@@ -35,6 +36,13 @@ extra_info:
     vendor: 小米
 
 allowlist:
+  lock:
+    xiaomi.lock.m40max:
+      name: 小米智能门锁 M40 Max
+      vendor: 小米
+      year: 2025
+      has_doorbell: true
+      has_door_lock_camera: true
   wifispeaker:
     xiaomi.wifispeaker.oh11:
       name: Xiaomi 智能家庭屏 11

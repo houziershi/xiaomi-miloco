@@ -47,6 +47,7 @@ from .const import (
 )
 from .types import (
     MIoTDeviceBindEvent,
+    MIoTDeviceEvent,
     MIoTDeviceStateEvent,
     MIoTSceneChangedEvent,
     MipsConnectionError,
@@ -109,6 +110,11 @@ _TOPIC_DEVICE_STATE = re.compile(
     r"^device/([^/]+)/state/(" + "|".join(_DEVICE_STATE_OPS) + r")$"
 )
 
+# Device-level events: `device/{did}/event/{siid}.{eiid}`.
+# did = group(1), siid = group(2), eiid = group(3). The topic format is
+# exact — no wildcard subscription is needed since we subscribe per-siid.eiid.
+_TOPIC_DEVICE_EVENT = re.compile(r"^device/([^/]+)/event/(\d+)\.(\d+)$")
+
 
 # Handler signatures accepted by sub_*_async methods. They receive a fully
 # decoded message object and may be sync or async — both are dispatched on the
@@ -116,6 +122,7 @@ _TOPIC_DEVICE_STATE = re.compile(
 BindHandler = Callable[[MIoTDeviceBindEvent], Union[None, Awaitable[None]]]
 SceneChangedHandler = Callable[[MIoTSceneChangedEvent], Union[None, Awaitable[None]]]
 DeviceStateHandler = Callable[[MIoTDeviceStateEvent], Union[None, Awaitable[None]]]
+DeviceEventHandler = Callable[[MIoTDeviceEvent], Union[None, Awaitable[None]]]
 MipsStateHandler = Callable[[bool], Union[None, Awaitable[None]]]
 # Fired when an unattended subscribe (no awaiter, e.g. the reconnect-time
 # re-issue in _on_connect) fails. Arg tuple = (topic, reason_code,
@@ -501,6 +508,26 @@ class MIoTMipsCloud:
         for op in _DEVICE_STATE_OPS:
             await self._unsubscribe_async(f"device/{did}/state/{op}")
 
+    async def sub_device_event_async(
+        self, did: str, siid: int, eiid: int, handler: DeviceEventHandler
+    ) -> None:
+        """Subscribe a device's event topic: `device/{did}/event/{siid}.{eiid}`.
+
+        This subscribes to a specific event (e.g., doorbell-ring, someone-at-the-door).
+        The topic format is exact — no wildcard subscription is used.
+        SUBACK rejection raises MipsSubscribeRejectedError.
+        """
+        topic = f"device/{did}/event/{siid}.{eiid}"
+        decoder = self._make_device_event_decoder()
+        await self._subscribe_async(topic, handler, decoder)
+
+    async def unsub_device_event_async(
+        self, did: str, siid: int, eiid: int
+    ) -> None:
+        """Unsubscribe a device's event topic."""
+        topic = f"device/{did}/event/{siid}.{eiid}"
+        await self._unsubscribe_async(topic)
+
     # ------------------------------------------------------- subscribe core
 
     async def _subscribe_async(
@@ -865,6 +892,30 @@ class MIoTMipsCloud:
             return MIoTDeviceStateEvent(
                 did=did,
                 event=op,  # type: ignore[arg-type]  # op ∈ {online,offline}
+                raw=raw if isinstance(raw, dict) else {},
+                timestamp_ms=_now_ms(),
+            )
+
+        return decode
+
+    @staticmethod
+    def _make_device_event_decoder() -> Callable[
+        [str, bytes], Optional[MIoTDeviceEvent]
+    ]:
+        # Device-level events: did + siid + eiid come from the topic;
+        # the payload is undocumented and kept verbatim in `raw`.
+        def decode(topic: str, payload: bytes) -> Optional[MIoTDeviceEvent]:
+            m = _TOPIC_DEVICE_EVENT.match(topic)
+            if not m:
+                return None
+            did = m.group(1)
+            siid = int(m.group(2))
+            eiid = int(m.group(3))
+            raw = _parse_json_payload(payload) or {}
+            return MIoTDeviceEvent(
+                did=did,
+                siid=siid,
+                eiid=eiid,
                 raw=raw if isinstance(raw, dict) else {},
                 timestamp_ms=_now_ms(),
             )

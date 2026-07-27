@@ -592,3 +592,136 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 )
 
         return _on_decoded_audio
+
+
+class LockCameraAdapter(CameraDeviceAdapter):
+    """Lock camera device adapter — on-demand video/audio frame streams.
+
+    Unlike regular cameras that maintain persistent connections, lock cameras
+    only connect when triggered (e.g., by a doorbell event) and disconnect
+    after a configured duration to preserve battery.
+
+    The adapter extends CameraDeviceAdapter with:
+    - On-demand connection management
+    - Automatic disconnection after recording duration
+    - Doorbell event handling
+    """
+
+    device_type = "lock_camera"
+    _node_name = NodeName.CAMERA
+
+    def __init__(
+        self,
+        miot_proxy: MiotProxy,
+        on_window_ready: Callable[[], None] | None = None,
+    ):
+        super().__init__(miot_proxy, on_window_ready)
+        # Track lock devices that are currently recording
+        self._recording_devices: set[str] = set()
+
+    async def discover_devices(
+        self,
+        all_devices: dict | None = None,
+        online_only: bool = True,
+        require_lan: bool = True,
+        cap: bool = True,
+    ) -> dict[str, PerceptionDevice]:
+        """Discover lock devices with camera capabilities.
+
+        Lock cameras are discovered differently from regular cameras:
+        they are always available (online) but only connected on-demand.
+        """
+        if not self._miot_proxy.is_authenticated:
+            return {}
+
+        # Get all devices and filter for lock devices with camera capabilities
+        devices = all_devices if all_devices else await self._miot_proxy.get_cameras()
+
+        result: dict[str, PerceptionDevice] = {}
+        for did, info in devices.items():
+            if not isinstance(info, MIoTCameraInfo):
+                continue
+
+            # Check if this is a lock device (model starts with "lock.")
+            model = info.model or ""
+            if not model.startswith("lock."):
+                continue
+
+            # Lock cameras are always considered available for on-demand connection
+            result[did] = PerceptionDevice(
+                did=did,
+                name=info.name,
+                device_type="lock_camera",
+                room_id=info.room_name,
+                room_name=info.room_name,
+                online=True,  # Lock cameras are always "available" for on-demand
+            )
+
+        return result
+
+    async def connect_device(
+        self, did: str, source: PerceptionDevice | None = None
+    ) -> None:
+        """Connect to a lock camera device.
+
+        This is called when a doorbell event triggers recording.
+        """
+        if did in self._devices:
+            return
+
+        logger.info("Connecting to lock camera %s", did)
+
+        # Use the parent class implementation for actual connection
+        await super().connect_device(did, source)
+
+        # Mark as recording
+        self._recording_devices.add(did)
+
+    async def disconnect_device(self, did: str) -> None:
+        """Disconnect from a lock camera device.
+
+        This is called after the recording duration expires.
+        """
+        logger.info("Disconnecting from lock camera %s", did)
+
+        # Remove from recording set
+        self._recording_devices.discard(did)
+
+        # Use the parent class implementation for actual disconnection
+        await super().disconnect_device(did)
+
+    async def start_recording(self, did: str) -> bool:
+        """Start recording for a lock camera device.
+
+        This is called by the doorbell event handler.
+        Returns True if recording started successfully.
+        """
+        if did in self._recording_devices:
+            logger.warning("Lock camera %s is already recording", did)
+            return False
+
+        try:
+            await self.connect_device(did)
+            return True
+        except Exception as e:
+            logger.error("Failed to start recording for lock camera %s: %s", did, e)
+            return False
+
+    async def stop_recording(self, did: str) -> None:
+        """Stop recording for a lock camera device.
+
+        This is called after the recording duration expires.
+        """
+        if did not in self._recording_devices:
+            logger.warning("Lock camera %s is not recording", did)
+            return
+
+        await self.disconnect_device(did)
+
+    def is_recording(self, did: str) -> bool:
+        """Check if a lock camera device is currently recording."""
+        return did in self._recording_devices
+
+    def get_recording_devices(self) -> set[str]:
+        """Get the set of lock camera devices currently recording."""
+        return self._recording_devices.copy()

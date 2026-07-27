@@ -429,6 +429,25 @@ class MIoTDeviceStateEvent(BaseModel):
     timestamp_ms: int = Field(default=0)
 
 
+class MIoTDeviceEvent(BaseModel):
+    """Decoded `device/{did}/event/{siid}.{eiid}` payload.
+
+    Device-level event push (e.g., doorbell-ring, someone-at-the-door).
+    `did`, `siid`, and `eiid` come from the topic; the payload is
+    undocumented and kept in `raw`.
+    """
+
+    did: str = Field(description="Device id")
+    siid: int = Field(description="Service instance ID")
+    eiid: int = Field(description="Event instance ID")
+    event_name: str = Field(default="", description="Event type name (e.g., doorbell-ring)")
+    raw: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Raw decoded payload (broker schema is undocumented)",
+    )
+    timestamp_ms: int = Field(default=0)
+
+
 class MipsConnectionError(Exception):
     """MIPS cloud client failed to connect."""
 

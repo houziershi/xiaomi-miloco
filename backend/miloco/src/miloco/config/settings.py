@@ -277,6 +277,23 @@ class CameraSettings(BaseModel):
     max_cache_images: int = Field(default=6, description="最大缓存图像数量")
 
 
+class LockCameraSettings(BaseModel):
+    """门锁摄像头配置。"""
+
+    recording_duration: int = Field(
+        default=10,
+        description="门铃触发后录制时长（秒）",
+    )
+    auto_disconnect: bool = Field(
+        default=True,
+        description="录制结束后是否自动断开连接以节省电量",
+    )
+    max_concurrent_recordings: int = Field(
+        default=3,
+        description="最大同时录制的门锁摄像头数量",
+    )
+
+
 class RuleSettings(BaseModel):
     """规则引擎相关配置。"""
 
@@ -606,6 +623,10 @@ class MilocoSettings(BaseSettings):
     camera: CameraSettings = Field(
         default_factory=CameraSettings,
         description="摄像头采集参数",
+    )
+    lock_camera: LockCameraSettings = Field(
+        default_factory=LockCameraSettings,
+        description="门锁摄像头配置",
     )
     rule: RuleSettings = Field(
         default_factory=RuleSettings,

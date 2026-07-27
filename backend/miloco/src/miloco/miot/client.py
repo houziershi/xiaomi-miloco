@@ -21,6 +21,7 @@ from miot.types import (
     MIoTActionParam,
     MIoTCameraInfo,
     MIoTDeviceBindEvent,
+    MIoTDeviceEvent,
     MIoTDeviceInfo,
     MIoTDeviceStateEvent,
     MIoTGetPropertyParam,
@@ -45,6 +46,7 @@ from miloco.miot.mips_listeners import (
     BindEventListener,
     CameraStateEventListener,
     DeviceMetaEventListener,
+    DoorbellEventListener,
     SceneEventListener,
 )
 from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
@@ -188,6 +190,17 @@ class MiotProxy:
         # _sync_camera_state_subscriptions.
         self._subscribed_state_dids: set[str] = set()
 
+        # Listener for doorbell events (doorbell-ring, someone-at-the-door).
+        # When triggered, it activates the lock camera for a configured duration.
+        self._doorbell_listener = DoorbellEventListener(
+            on_doorbell=self._on_doorbell_event
+        )
+        # Lock devices that have doorbell/camera capabilities and their
+        # event subscription info: did -> {event_key: (siid, eiid)}
+        self._lock_devices: dict[str, dict[str, tuple[int, int]]] = {}
+        # Active lock camera recording sessions: did -> asyncio.Task
+        self._lock_camera_tasks: dict[str, asyncio.Task] = {}
+
     def _build_bind_listener(self) -> BindEventListener:
         """Build a fresh BindEventListener.
 
@@ -280,6 +293,9 @@ class MiotProxy:
         )
         # Home scene change (rename/delete/edit): refresh the scene list.
         self._miot_client.register_scene_changed_callback(self._on_scene_changed_event)
+        # Device events (doorbell-ring, someone-at-the-door, etc.): trigger
+        # lock camera recording.
+        self._miot_client.register_device_event_callback(self._on_device_event)
 
         await self._miot_client.init_async()
 
@@ -310,6 +326,12 @@ class MiotProxy:
         self._meta_listener.deinit()
         self._scene_listener.deinit()
         self._camera_state_listener.deinit()
+        self._doorbell_listener.deinit()
+
+        # Cancel any active lock camera recording tasks
+        for task in self._lock_camera_tasks.values():
+            task.cancel()
+        self._lock_camera_tasks.clear()
 
         # 2. Destroy all camera_img_managers
         for mgr in self._camera_img_managers.values():
@@ -809,6 +831,7 @@ class MiotProxy:
                 self._device_info_dict = devices
                 await self._sync_meta_subscriptions()
                 await self._sync_scene_subscriptions()
+                await self._sync_lock_device_subscriptions()
                 return devices
             except Exception as e:
                 logger.error("Failed to refresh devices: %s", e)
@@ -1036,6 +1059,108 @@ class MiotProxy:
         """
         await self._scene_listener.on_event(msg)
 
+    async def _on_device_event(self, msg: MIoTDeviceEvent) -> None:
+        """Forward device events (doorbell-ring, someone-at-the-door) to the listener.
+
+        The debounce + trigger logic lives in
+        ``miloco.miot.mips_listeners.DoorbellEventListener``.
+        """
+        logger.info(
+            "Device event received: did=%s siid=%d eiid=%d raw=%r",
+            msg.did,
+            msg.siid,
+            msg.eiid,
+            msg.raw,
+        )
+        await self._doorbell_listener.on_event(msg)
+
+    async def _on_doorbell_event(self, event: MIoTDeviceEvent) -> None:
+        """Handle doorbell event: start lock camera recording for configured duration.
+
+        This is called by the DoorbellEventListener after debounce settles.
+        It triggers the lock camera to start recording for a configured duration,
+        then automatically disconnects to preserve battery.
+        """
+        did = event.did
+        logger.info(
+            "Doorbell event triggered for lock %s, starting camera recording",
+            did,
+        )
+
+        # Cancel any existing recording task for this device
+        existing_task = self._lock_camera_tasks.get(did)
+        if existing_task and not existing_task.done():
+            logger.info("Cancelling existing recording task for lock %s", did)
+            existing_task.cancel()
+
+        # Start a new recording task
+        task = asyncio.create_task(self._lock_camera_recording_session(did))
+        self._lock_camera_tasks[did] = task
+
+    async def _lock_camera_recording_session(self, did: str) -> None:
+        """Run a lock camera recording session for the configured duration.
+
+        This method:
+        1. Connects to the lock camera
+        2. Records video for LOCK_CAMERA_RECORDING_DURATION seconds
+        3. Disconnects to preserve battery
+        """
+        try:
+            _settings = get_settings()
+            duration = _settings.lock_camera.recording_duration
+
+            logger.info(
+                "Starting lock camera recording for %s, duration=%ds",
+                did,
+                duration,
+            )
+
+            # Get the lock device info
+            lock_info = self._lock_devices.get(did)
+            if not lock_info:
+                logger.warning("Lock device %s not found in _lock_devices", did)
+                return
+
+            # Get camera siid from lock device spec
+            # The lock camera is accessed through the door-lock-camera service
+            camera_did = did  # Lock camera uses the same DID as the lock
+
+            # Start the camera stream
+            camera_handler = self._camera_img_managers.get(camera_did)
+            if not camera_handler:
+                logger.warning(
+                    "No camera handler found for lock %s, "
+                    "camera may not be initialized",
+                    camera_did,
+                )
+                return
+
+            # The camera is already connected via refresh_cameras
+            # We just need to wait for the recording duration
+            logger.info(
+                "Lock camera recording in progress for %s, waiting %ds",
+                did,
+                duration,
+            )
+            await asyncio.sleep(duration)
+
+            logger.info(
+                "Lock camera recording completed for %s, disconnecting",
+                did,
+            )
+
+        except asyncio.CancelledError:
+            logger.info("Lock camera recording cancelled for %s", did)
+        except Exception as e:
+            logger.error(
+                "Lock camera recording failed for %s: %s",
+                did,
+                e,
+            )
+        finally:
+            # Clean up the task reference
+            self._lock_camera_tasks.pop(did, None)
+
     def _collect_home_ids(self) -> set[str]:
         """Union of home_ids across cached devices / cameras / scenes.
 
@@ -1108,6 +1233,127 @@ class MiotProxy:
             len([h for h in removed if h]),
             len(self._subscribed_scene_home_ids),
         )
+
+    async def _sync_lock_device_subscriptions(self) -> None:
+        """Reconcile per-device event subscriptions for lock devices.
+
+        Called at the tail of refresh_devices (under _refresh_devices_lock).
+        Discovers lock devices with doorbell/camera capabilities and subscribes
+        to their doorbell-ring and someone-at-the-door events.
+        """
+        from miot.camera import MIoTCameraExtraInfo, is_camera_model
+
+        # Find lock devices in the device list
+        new_lock_devices: dict[str, dict[str, tuple[int, int]]] = {}
+
+        for did, device in self._device_info_dict.items():
+            # Check if this is a lock device
+            model = device.model or ""
+            if not model.startswith("lock."):
+                continue
+
+            # Check if it's in the camera allowlist
+            try:
+                camera_extra_info = await self._get_camera_extra_info()
+                if not is_camera_model(model, camera_extra_info):
+                    continue
+            except Exception as e:
+                logger.debug("Failed to check camera model for %s: %s", did, e)
+                continue
+
+            # Get the device spec to find doorbell and door-lock-camera services
+            try:
+                spec = await self._miot_client.spec_parser.parse_async(urn=device.urn)
+                if not spec:
+                    continue
+
+                event_subs: dict[str, tuple[int, int]] = {}
+
+                for service in spec.services:
+                    service_type = service.type_ or ""
+
+                    # Check for doorbell service (has doorbell-ring event)
+                    if "doorbell" in service_type.lower():
+                        for event in service.events:
+                            event_type = event.type_ or ""
+                            if "doorbell-ring" in event_type.lower():
+                                event_subs["doorbell-ring"] = (service.iid, event.iid)
+                                logger.info(
+                                    "Found doorbell-ring event for lock %s: siid=%d eiid=%d",
+                                    did,
+                                    service.iid,
+                                    event.iid,
+                                )
+
+                    # Check for door-lock-camera service (has someone-at-the-door event)
+                    if "door-lock-camera" in service_type.lower():
+                        for event in service.events:
+                            event_type = event.type_ or ""
+                            if "someone-at-the-door" in event_type.lower():
+                                event_subs["someone-at-the-door"] = (service.iid, event.iid)
+                                logger.info(
+                                    "Found someone-at-the-door event for lock %s: siid=%d eiid=%d",
+                                    did,
+                                    service.iid,
+                                    event.iid,
+                                )
+
+                if event_subs:
+                    new_lock_devices[did] = event_subs
+
+            except Exception as e:
+                logger.error("Failed to get spec for lock %s: %s", did, e)
+                continue
+
+        # Unsubscribe events for removed lock devices
+        for did in set(self._lock_devices.keys()) - set(new_lock_devices.keys()):
+            for event_key, (siid, eiid) in self._lock_devices[did].items():
+                try:
+                    await self._miot_client.unsub_device_event_async(did, siid, eiid)
+                    logger.info("Unsubscribed %s event for lock %s", event_key, did)
+                except Exception as e:
+                    logger.error(
+                        "Failed to unsubscribe %s event for lock %s: %s",
+                        event_key,
+                        did,
+                        e,
+                    )
+
+        # Subscribe events for new lock devices
+        for did, events in new_lock_devices.items():
+            if did not in self._lock_devices:
+                for event_key, (siid, eiid) in events.items():
+                    try:
+                        await self._miot_client.sub_device_event_async(did, siid, eiid)
+                        logger.info("Subscribed %s event for lock %s", event_key, did)
+                    except Exception as e:
+                        logger.error(
+                            "Failed to subscribe %s event for lock %s: %s",
+                            event_key,
+                            did,
+                            e,
+                        )
+
+        self._lock_devices = new_lock_devices
+        logger.info(
+            "Lock device subscriptions synced: %d lock devices with doorbell events",
+            len(new_lock_devices),
+        )
+
+    async def _get_camera_extra_info(self):
+        """Get camera extra info from the config file."""
+        from miot.camera import MIoTCameraExtraInfo
+        from pathlib import Path
+        import yaml
+
+        config_path = Path(__file__).parent.parent.parent.parent / "miot" / "configs" / "camera_extra_info.yaml"
+        if not config_path.exists():
+            return MIoTCameraExtraInfo()
+
+        with open(config_path) as f:
+            data = yaml.safe_load(f)
+
+        return MIoTCameraExtraInfo(**data)
 
     def get_mips_status(self) -> dict:
         """Snapshot of cloud-MQTT connection and user-level subscribe status.

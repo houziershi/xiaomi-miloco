@@ -31,6 +31,7 @@ from typing import Any
 
 from miot.types import (
     MIoTDeviceBindEvent,
+    MIoTDeviceEvent,
     MIoTDeviceInfo,
     MIoTDeviceStateEvent,
     MIoTSceneChangedEvent,
@@ -406,3 +407,79 @@ class CameraStateEventListener(_TrailingDebounce):
             )
             return
         logger.info("camera-state debounce settled: cloud online status reconciled")
+
+
+# Doorbell event debounce window. Doorbell events are transient and should
+# trigger camera activation quickly, so we use a short debounce.
+DOORBELL_DEBOUNCE_SEC: float = 2.0
+
+# Type alias for the doorbell trigger callback.
+# Receives the device event and returns nothing.
+DoorbellTrigger = Callable[[MIoTDeviceEvent], Awaitable[None]]
+
+
+class DoorbellEventListener(_TrailingDebounce):
+    """Per-did debounce for device events (e.g., doorbell-ring, someone-at-the-door).
+
+    When a doorbell event is received, it triggers the lock camera to start
+    recording for a configured duration. The debounce prevents multiple rapid
+    triggers from creating multiple recording sessions.
+    """
+
+    def __init__(
+        self,
+        on_doorbell: DoorbellTrigger,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
+        super().__init__(loop)
+        self._on_doorbell = on_doorbell
+        # Store the event for the trigger callback
+        self._pending_events: dict[str, MIoTDeviceEvent] = {}
+
+    def _window(self) -> float:
+        return DOORBELL_DEBOUNCE_SEC
+
+    async def on_event(self, msg: MIoTDeviceEvent) -> None:
+        if self._closed:
+            logger.debug(
+                "doorbell event ignored: listener closed (did=%s)", msg.did
+            )
+            return
+        logger.info(
+            "mips device event received: did=%s siid=%d eiid=%d raw=%r; "
+            "scheduling %ss debounce",
+            msg.did,
+            msg.siid,
+            msg.eiid,
+            msg.raw,
+            DOORBELL_DEBOUNCE_SEC,
+        )
+        # Store the event for later use in _fire
+        self._pending_events[msg.did] = msg
+        self._schedule(msg.did)
+
+    def deinit(self) -> None:
+        super().deinit()
+        self._pending_events.clear()
+
+    async def _fire(self, key: Any) -> None:
+        did = key
+        event = self._pending_events.pop(did, None)
+        if event is None:
+            logger.debug("doorbell debounce fire: no pending event for did=%s", did)
+            return
+        try:
+            await self._on_doorbell(event)
+        except Exception as e:
+            logger.error(
+                "doorbell debounce settled but on_doorbell failed: did=%s err=%s",
+                did,
+                e,
+            )
+            return
+        logger.info(
+            "doorbell debounce settled: did=%s siid=%d eiid=%d triggered",
+            did,
+            event.siid,
+            event.eiid,
+        )

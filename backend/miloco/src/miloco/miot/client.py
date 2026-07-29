@@ -1100,11 +1100,13 @@ class MiotProxy:
     async def _lock_camera_recording_session(self, did: str) -> None:
         """Run a lock camera recording session for the configured duration.
 
-        This method:
-        1. Connects to the lock camera
-        2. Records video for LOCK_CAMERA_RECORDING_DURATION seconds
-        3. Disconnects to preserve battery
+        Lock cameras are low-power devices that are not always online.
+        When a doorbell event fires, this method:
+        1. Creates a camera handler on-demand if none exists
+        2. Waits for the configured recording duration
+        3. Destroys the handler to disconnect and preserve battery
         """
+        created_handler = False
         try:
             _settings = get_settings()
             duration = _settings.lock_camera.recording_duration
@@ -1121,22 +1123,36 @@ class MiotProxy:
                 logger.warning("Lock device %s not found in _lock_devices", did)
                 return
 
-            # Get camera siid from lock device spec
-            # The lock camera is accessed through the door-lock-camera service
-            camera_did = did  # Lock camera uses the same DID as the lock
-
-            # Start the camera stream
-            camera_handler = self._camera_img_managers.get(camera_did)
+            # Get or create camera handler on-demand
+            camera_handler = self._camera_img_managers.get(did)
             if not camera_handler:
-                logger.warning(
-                    "No camera handler found for lock %s, "
-                    "camera may not be initialized",
-                    camera_did,
+                logger.info(
+                    "No camera handler for lock %s, creating on-demand connection",
+                    did,
                 )
-                return
+                # Try to get camera info from the cached dict
+                camera_info = self._camera_info_dict.get(did)
+                if not camera_info:
+                    # Camera info not cached — refresh cameras first
+                    logger.info("Camera info not cached for %s, refreshing cameras", did)
+                    await self.refresh_cameras()
+                    camera_info = self._camera_info_dict.get(did)
+                if not camera_info:
+                    logger.warning(
+                        "No camera info found for lock %s, "
+                        "device may not be bound or model not in allowlist",
+                        did,
+                    )
+                    return
 
-            # The camera is already connected via refresh_cameras
-            # We just need to wait for the recording duration
+                # Create camera handler on-demand (establishes PPCS connection)
+                camera_handler = await self._create_camera_img_manager(camera_info)
+                if not camera_handler:
+                    logger.error("Failed to create camera handler for lock %s", did)
+                    return
+                created_handler = True
+                logger.info("On-demand camera handler created for lock %s", did)
+
             logger.info(
                 "Lock camera recording in progress for %s, waiting %ds",
                 did,
@@ -1145,7 +1161,7 @@ class MiotProxy:
             await asyncio.sleep(duration)
 
             logger.info(
-                "Lock camera recording completed for %s, disconnecting",
+                "Lock camera recording completed for %s",
                 did,
             )
 
@@ -1158,6 +1174,14 @@ class MiotProxy:
                 e,
             )
         finally:
+            # Disconnect on-demand handler to preserve battery
+            if created_handler and did in self._camera_img_managers:
+                try:
+                    logger.info("Disconnecting on-demand camera for lock %s", did)
+                    await self._camera_img_managers[did].destroy()
+                    del self._camera_img_managers[did]
+                except Exception as e:
+                    logger.error("Failed to disconnect lock camera %s: %s", did, e)
             # Clean up the task reference
             self._lock_camera_tasks.pop(did, None)
 

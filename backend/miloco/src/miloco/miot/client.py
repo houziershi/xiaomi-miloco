@@ -1271,9 +1271,10 @@ class MiotProxy:
         new_lock_devices: dict[str, dict[str, tuple[int, int]]] = {}
 
         for did, device in self._device_info_dict.items():
-            # Check if this is a lock device
+            # Check if this is a lock device (model format: {vendor}.{class}.{model})
             model = device.model or ""
-            if not model.startswith("lock."):
+            parts = model.split(".")
+            if len(parts) < 2 or parts[1] != "lock":
                 continue
 
             # Check if it's in the camera allowlist

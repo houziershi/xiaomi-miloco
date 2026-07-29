@@ -1292,7 +1292,9 @@ class MiotProxy:
                 if not spec:
                     continue
 
-                event_subs: dict[str, tuple[int, int]] = {}
+                # Collect ALL candidate events (may be multiple doorbell services)
+                doorbell_candidates: list[tuple[int, int]] = []
+                someone_candidates: list[tuple[int, int]] = []
 
                 for service in spec.services:
                     service_type = service.type_ or ""
@@ -1302,7 +1304,7 @@ class MiotProxy:
                         for event in service.events:
                             event_type = event.type_ or ""
                             if "doorbell-ring" in event_type.lower():
-                                event_subs["doorbell-ring"] = (service.iid, event.iid)
+                                doorbell_candidates.append((service.iid, event.iid))
                                 logger.info(
                                     "Found doorbell-ring event for lock %s: siid=%d eiid=%d",
                                     did,
@@ -1315,7 +1317,7 @@ class MiotProxy:
                         for event in service.events:
                             event_type = event.type_ or ""
                             if "someone-at-the-door" in event_type.lower():
-                                event_subs["someone-at-the-door"] = (service.iid, event.iid)
+                                someone_candidates.append((service.iid, event.iid))
                                 logger.info(
                                     "Found someone-at-the-door event for lock %s: siid=%d eiid=%d",
                                     did,
@@ -1323,8 +1325,11 @@ class MiotProxy:
                                     event.iid,
                                 )
 
-                if event_subs:
-                    new_lock_devices[did] = event_subs
+                if doorbell_candidates or someone_candidates:
+                    new_lock_devices[did] = {
+                        "doorbell_candidates": doorbell_candidates,
+                        "someone_candidates": someone_candidates,
+                    }
 
             except Exception as e:
                 logger.error("Failed to get spec for lock %s: %s", did, e)
@@ -1332,37 +1337,61 @@ class MiotProxy:
 
         # Unsubscribe events for removed lock devices
         for did in set(self._lock_devices.keys()) - set(new_lock_devices.keys()):
-            for event_key, (siid, eiid) in self._lock_devices[did].items():
-                try:
-                    await self._miot_client.unsub_device_event_async(did, siid, eiid)
-                    logger.info("Unsubscribed %s event for lock %s", event_key, did)
-                except Exception as e:
-                    logger.error(
-                        "Failed to unsubscribe %s event for lock %s: %s",
-                        event_key,
-                        did,
-                        e,
-                    )
+            for event_key, subs in self._lock_devices[did].items():
+                if event_key == "subscribed":
+                    for siid, eiid in subs:
+                        try:
+                            await self._miot_client.unsub_device_event_async(did, siid, eiid)
+                            logger.info("Unsubscribed event for lock %s: siid=%d eiid=%d", did, siid, eiid)
+                        except Exception as e:
+                            logger.error("Failed to unsubscribe event for lock %s: %s", did, e)
 
         # Subscribe events for new lock devices
-        for did, events in new_lock_devices.items():
-            if did not in self._lock_devices:
-                for event_key, (siid, eiid) in events.items():
-                    try:
-                        await self._miot_client.sub_device_event_async(did, siid, eiid)
-                        logger.info("Subscribed %s event for lock %s", event_key, did)
-                    except Exception as e:
-                        logger.error(
-                            "Failed to subscribe %s event for lock %s: %s",
-                            event_key,
-                            did,
-                            e,
-                        )
+        for did, candidates in new_lock_devices.items():
+            if did in self._lock_devices:
+                continue
+
+            subscribed: list[tuple[int, int]] = []
+
+            # Try doorbell-ring candidates in order, stop at first success
+            for siid, eiid in candidates.get("doorbell_candidates", []):
+                try:
+                    await self._miot_client.sub_device_event_async(did, siid, eiid)
+                    subscribed.append((siid, eiid))
+                    logger.info("Subscribed doorbell-ring for lock %s: siid=%d eiid=%d", did, siid, eiid)
+                    break
+                except Exception as e:
+                    logger.warning(
+                        "Subscribe doorbell-ring failed for lock %s siid=%d eiid=%d: %s, trying next",
+                        did, siid, eiid, e,
+                    )
+
+            # Try someone-at-the-door candidates in order, stop at first success
+            for siid, eiid in candidates.get("someone_candidates", []):
+                try:
+                    await self._miot_client.sub_device_event_async(did, siid, eiid)
+                    subscribed.append((siid, eiid))
+                    logger.info("Subscribed someone-at-the-door for lock %s: siid=%d eiid=%d", did, siid, eiid)
+                    break
+                except Exception as e:
+                    logger.warning(
+                        "Subscribe someone-at-the-door failed for lock %s siid=%d eiid=%d: %s, trying next",
+                        did, siid, eiid, e,
+                    )
+
+            if subscribed:
+                new_lock_devices[did]["subscribed"] = subscribed
+            else:
+                logger.warning("No subscribable events found for lock %s", did)
 
         self._lock_devices = new_lock_devices
+        n_subscribed = sum(
+            len(v.get("subscribed", [])) for v in new_lock_devices.values()
+        )
         logger.info(
-            "Lock device subscriptions synced: %d lock devices with doorbell events",
+            "Lock device subscriptions synced: %d lock devices, %d events subscribed",
             len(new_lock_devices),
+            n_subscribed,
         )
 
     async def _get_camera_extra_info(self):

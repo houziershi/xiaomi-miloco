@@ -1359,31 +1359,31 @@ class MiotProxy:
 
             subscribed: list[tuple[int, int]] = []
 
-            # Try doorbell-ring candidates in order, stop at first success
-            for siid, eiid in candidates.get("doorbell_candidates", []):
-                try:
-                    await self._miot_client.sub_device_event_async(did, siid, eiid)
-                    subscribed.append((siid, eiid))
-                    logger.info("Subscribed doorbell-ring for lock %s: siid=%d eiid=%d", did, siid, eiid)
-                    break
-                except Exception as e:
-                    logger.warning(
-                        "Subscribe doorbell-ring failed for lock %s siid=%d eiid=%d: %s, trying next",
-                        did, siid, eiid, e,
-                    )
+            # [TEMP DISABLED] Try doorbell-ring candidates in order, stop at first success
+            # for siid, eiid in candidates.get("doorbell_candidates", []):
+            #     try:
+            #         await self._miot_client.sub_device_event_async(did, siid, eiid)
+            #         subscribed.append((siid, eiid))
+            #         logger.info("Subscribed doorbell-ring for lock %s: siid=%d eiid=%d", did, siid, eiid)
+            #         break
+            #     except Exception as e:
+            #         logger.warning(
+            #             "Subscribe doorbell-ring failed for lock %s siid=%d eiid=%d: %s, trying next",
+            #             did, siid, eiid, e,
+            #         )
 
-            # Try someone-at-the-door candidates in order, stop at first success
-            for siid, eiid in candidates.get("someone_candidates", []):
-                try:
-                    await self._miot_client.sub_device_event_async(did, siid, eiid)
-                    subscribed.append((siid, eiid))
-                    logger.info("Subscribed someone-at-the-door for lock %s: siid=%d eiid=%d", did, siid, eiid)
-                    break
-                except Exception as e:
-                    logger.warning(
-                        "Subscribe someone-at-the-door failed for lock %s siid=%d eiid=%d: %s, trying next",
-                        did, siid, eiid, e,
-                    )
+            # [TEMP DISABLED] Try someone-at-the-door candidates in order, stop at first success
+            # for siid, eiid in candidates.get("someone_candidates", []):
+            #     try:
+            #         await self._miot_client.sub_device_event_async(did, siid, eiid)
+            #         subscribed.append((siid, eiid))
+            #         logger.info("Subscribed someone-at-the-door for lock %s: siid=%d eiid=%d", did, siid, eiid)
+            #         break
+            #     except Exception as e:
+            #         logger.warning(
+            #             "Subscribe someone-at-the-door failed for lock %s siid=%d eiid=%d: %s, trying next",
+            #             did, siid, eiid, e,
+            #         )
 
             if subscribed:
                 new_lock_devices[did]["subscribed"] = subscribed
@@ -1391,13 +1391,13 @@ class MiotProxy:
                 logger.warning("No subscribable events found for lock %s", did)
 
             # Debug: subscribe to all events via wildcard for diagnostics
-            # try:
-            #     mips = self._miot_client._mips_cloud
-            #     if mips and mips.is_connected:
-            #         await mips.sub_device_event_debug_async(did, self._on_debug_device_event)
-            #         logger.info("Debug wildcard event subscription added for lock %s", did)
-            # except Exception as e:
-            #     logger.debug("Debug subscription failed for lock %s: %s", did, e)
+            try:
+                mips = self._miot_client._mips_cloud
+                if mips and mips.is_connected:
+                    await mips.sub_device_event_debug_async(did, self._on_debug_device_event)
+                    logger.info("Debug wildcard event subscription added for lock %s", did)
+            except Exception as e:
+                logger.debug("Debug wildcard subscription failed for lock %s: %s", did, e)
 
         self._lock_devices = new_lock_devices
         n_subscribed = sum(

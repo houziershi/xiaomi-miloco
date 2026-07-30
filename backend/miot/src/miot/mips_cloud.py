@@ -511,13 +511,7 @@ class MIoTMipsCloud:
     async def sub_device_event_async(
         self, did: str, siid: int, eiid: int, handler: DeviceEventHandler
     ) -> None:
-        """Subscribe a device's event topic: `device/{did}/event/{siid}.{eiid}`.
-
-        This subscribes to a specific event (e.g., doorbell-ring, someone-at-the-door).
-        The topic format is exact — no wildcard subscription is used.
-        SUBACK rejection raises MipsSubscribeRejectedError.
-        """
-        topic = f"device/{did}/event/{siid}.{eiid}"
+        topic = f"device/{did}/up/event_occured/{siid}/{eiid}"
         decoder = self._make_device_event_decoder()
         await self._subscribe_async(topic, handler, decoder)
 
@@ -525,8 +519,38 @@ class MIoTMipsCloud:
         self, did: str, siid: int, eiid: int
     ) -> None:
         """Unsubscribe a device's event topic."""
-        topic = f"device/{did}/event/{siid}.{eiid}"
+        topic = f"device/{did}/up/event_occured/{siid}/{eiid}"
         await self._unsubscribe_async(topic)
+
+    async def sub_device_event_debug_async(
+        self, did: str, handler: Callable[[str, bytes], Union[None, Awaitable[None]]]
+    ) -> None:
+        """Debug: subscribe to all events for a device via wildcard topic.
+
+        Topic: `device/{did}/up/event_occured/#`
+        Handler receives raw (topic, payload) for logging — no decoding.
+        """
+        topic = f"device/{did}/up/event_occured/#"
+
+        def _raw_decoder(t: str, p: bytes):
+            return (t, p)
+
+        await self._subscribe_async(topic, handler, _raw_decoder)
+
+    async def sub_device_prop_debug_async(
+        self, did: str, siid: int, piid: int, handler: Callable[[str, bytes], Union[None, Awaitable[None]]]
+    ) -> None:
+        """Debug: subscribe to a specific property change topic.
+
+        Topic: `device/{did}/up/properties_changed/{siid}/{piid}`
+        Handler receives raw (topic, payload) for logging — no decoding.
+        """
+        topic = f"device/{did}/up/properties_changed/{siid}/{piid}"
+
+        def _raw_decoder(t: str, p: bytes):
+            return (t, p)
+
+        await self._subscribe_async(topic, handler, _raw_decoder)
 
     # ------------------------------------------------------- subscribe core
 

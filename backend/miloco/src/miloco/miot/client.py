@@ -1059,6 +1059,12 @@ class MiotProxy:
         """
         await self._scene_listener.on_event(msg)
 
+    @staticmethod
+    def _on_debug_device_event(msg: tuple[str, bytes]) -> None:
+        """Debug handler: log raw event topic and payload."""
+        topic, payload = msg
+        logger.warning("[DEBUG-EVENT] topic=%s payload=%s", topic, payload.decode(errors="replace"))
+
     async def _on_device_event(self, msg: MIoTDeviceEvent) -> None:
         """Forward device events (doorbell-ring, someone-at-the-door) to the listener.
 
@@ -1383,6 +1389,15 @@ class MiotProxy:
                 new_lock_devices[did]["subscribed"] = subscribed
             else:
                 logger.warning("No subscribable events found for lock %s", did)
+
+            # Debug: subscribe to all events via wildcard for diagnostics
+            # try:
+            #     mips = self._miot_client._mips_cloud
+            #     if mips and mips.is_connected:
+            #         await mips.sub_device_event_debug_async(did, self._on_debug_device_event)
+            #         logger.info("Debug wildcard event subscription added for lock %s", did)
+            # except Exception as e:
+            #     logger.debug("Debug subscription failed for lock %s: %s", did, e)
 
         self._lock_devices = new_lock_devices
         n_subscribed = sum(

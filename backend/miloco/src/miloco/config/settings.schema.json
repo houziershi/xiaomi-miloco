@@ -156,6 +156,12 @@
           "default": null,
           "description": "播放 OpenClaw 回复文本的外部命令参数列表；为空则不播放。支持 {text}/{did}/{siid}/{eiid} 占位符"
         },
+        "doorbell_speech_source_dids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "门铃会话额外接受的访客语音来源 did 列表；用于门铃事件 did 与实际拾音摄像头 did 不一致的设备"
+        },
         "doorbell_conversation_enabled": {
           "type": "boolean",
           "default": true,

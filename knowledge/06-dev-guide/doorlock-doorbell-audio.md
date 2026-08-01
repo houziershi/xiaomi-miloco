@@ -10,6 +10,41 @@
 
 职责边界：Miloco 识别 MIoT 门铃事件、维护本次门铃会话状态、接收播放结果回调并转发访客语音；OpenClaw 负责拿到回复文本后执行唤醒、TTS、PCM 转码和门锁音频发送。
 
+## 当前交互流程
+
+当前验证通过的交互链路如下：
+
+1. 访客按门锁门铃。
+2. Miloco 通过 MIoT 设备级通配 topic 收到事件：`device/<doorbell_did>/up/event_occured/#`。
+3. Miloco 在本地按 `doorbell_siid` / `doorbell_eiid` 过滤出门铃事件，创建一个门铃会话 `conversation_id`。
+4. Miloco 把“门铃被按下：...”发送到配置的 `doorbell_session_key`。
+5. OpenClaw 在该会话里回复文本，例如“你是谁？你有什么事”。
+6. OpenClaw 插件先执行 `doorbell_wake_action_iid` 唤醒门锁，再执行 `doorbell_reply_audio_command` 播放回复音频。
+7. OpenClaw 插件把播放结果回调给 Miloco；只有回调 `success=true` 后，Miloco 才进入访客拾音窗口。
+8. 访客在门锁旁说话，例如“我是快递员，取件码是多少”。
+9. 感知引擎识别出完整语音后，Miloco 只在来源 DID 命中以下任一项时接管为门铃会话语音：
+   - `doorbell_did` 本身。
+   - 自动发现的同名/数字后缀门锁摄像头 DID。
+   - 显式配置的 `doorbell_speech_source_dids`。
+10. Miloco 把访客语音转成 `门外访客说：我是快递员，取件码是多少`，继续发送到同一个 OpenClaw 会话。
+11. OpenClaw 再次回复；OpenClaw 插件再次先唤醒门锁，再播放音频。
+12. 每轮播放成功后继续进入下一轮访客拾音，直到达到 `doorbell_max_turns`、播放失败，或静默超时。
+13. 如果访客一直不说话，Miloco 不再请求 OpenClaw 生成回复，而是直接播放 `doorbell_silence_fallback_text` 并结束本次会话。
+
+关键日志链路：
+
+- `doorbell event received ...`：收到并匹配到配置的门铃事件。
+- `doorbell speech source dids resolved ...`：解析本次会话接受哪些语音来源 DID。
+- `doorbell conversation handoff ...`：开始把门铃事件交给门铃会话状态机。
+- `doorbell conversation started ... conversation_id ...`：门铃会话已创建。
+- `doorbell agent turn starting/submitted ... trace_id ...`：已向 OpenClaw 发起一轮对话。
+- `doorbell audio callback received ... success=true`：OpenClaw 插件已回调播放结果。
+- `doorbell conversation listening ...`：Miloco 已开始等待访客语音。
+- `doorbell early/final speech candidates ...`：感知引擎产出了可用于门铃会话判断的完整语音。
+- `doorbell speech accepted ...`：访客语音已进入同一个门铃会话。
+- `doorbell speech ignored ...`：访客语音未进入门铃会话，日志里会给出原因，例如未监听、超时、重复或来源 DID 不匹配。
+- `doorbell conversation silence timeout ...`：访客静默超时，准备走固定兜底音频。
+
 ## 1. 前置条件
 
 - OpenClaw gateway 可用，访问地址类似 `http://127.0.0.1:18789/`。
@@ -151,6 +186,7 @@ miloco-cli config set miot.doorbell_wake_action_iid 'action.17.3'
     "doorbell_eiid": 1006,
     "doorbell_session_key": "agent:main:dashboard:xxxx",
     "doorbell_wake_action_iid": "action.17.3",
+    "doorbell_speech_source_dids": ["<camera-did-that-records-visitor-speech>"],
     "doorbell_reply_audio_command": [
       "/Users/<you>/.openclaw/miloco/scripts/doorbell_reply_audio.sh",
       "{text}"
@@ -172,6 +208,7 @@ Miloco 会把这些值传给 OpenClaw 插件；OpenClaw 插件会先执行唤醒
 双向对话相关配置：
 
 - `doorbell_conversation_enabled`：是否启用门铃双向语音对话，默认 `true`。关闭后只做单次门铃消息和回复播放，不监听访客语音。
+- `doorbell_speech_source_dids`：门铃会话额外接受的访客语音来源 DID 列表，默认 `[]`。当门铃事件 DID 和实际拾音摄像头 DID 不一致时填写，例如门铃事件来自锁 DID、语音识别来自同一门锁的第二路摄像头 DID。Miloco 仍会自动加入 `doorbell_did`，并尝试按同名/数字后缀自动发现同门锁摄像头；这个配置是显式兜底。
 - `doorbell_visitor_listen_seconds`：每次门锁回复音频播放成功后，等待访客说话的窗口，默认 `15.0` 秒。
 - `doorbell_max_turns`：单次门铃会话最多接收并转发的访客语音轮数，默认 `3`。
 - `doorbell_visitor_message_prefix`：访客转写发给 OpenClaw 时的前缀，默认 `门外访客说：`。
@@ -188,6 +225,7 @@ Miloco 会把这些值传给 OpenClaw 插件；OpenClaw 插件会先执行唤醒
     "doorbell_eiid": 1006,
     "doorbell_session_key": "agent:main:dashboard:xxxx",
     "doorbell_wake_action_iid": "action.17.3",
+    "doorbell_speech_source_dids": ["1179480261"],
     "doorbell_reply_audio_command": [
       "/Users/<you>/.openclaw/miloco/scripts/doorbell_reply_audio.sh",
       "{text}"
@@ -207,13 +245,16 @@ Miloco 会把这些值传给 OpenClaw 插件；OpenClaw 插件会先执行唤醒
 - 门铃事件会附加 OpenClaw 系统提示，让回复尽量短、适合直接播放。
 - OpenClaw 回复文本播放成功后，Miloco 才进入访客拾音窗口。
 - 如果唤醒门锁或播放音频失败，OpenClaw 会回调失败，Miloco 结束本次门铃会话，不再监听访客语音。
-- 访客语音必须满足 `is_complete=true` 且来源 did 匹配门锁 did，才会转发为 `门外访客说：...`。
+- 访客语音必须满足 `is_complete=true` 且来源 DID 匹配门锁 DID、自动发现的同名摄像头 DID 或 `doorbell_speech_source_dids`，才会转发为 `门外访客说：...`。
 - 每次访客语音进入同一 OpenClaw 会话后，OpenClaw 的新回复会再次唤醒门锁并播放。
 - 如果监听窗口内没有访客语音，Miloco 不再调用 OpenClaw 生成回复，而是直接请求 OpenClaw 插件播放 `doorbell_silence_fallback_text`，播放后结束会话。
+- 有识别文本但没进门铃会话时，查看 `doorbell conversation started ... speech_source_dids=...`、`doorbell speech accepted`、`doorbell speech ignored` 日志；如果日志提示 `source did mismatch`，把实际语音来源 DID 加到 `doorbell_speech_source_dids`。
 
 ## 7. 安装/重启服务
 
-开发分支本地验证时，从仓库根目录执行：
+开发分支本地验证时，从仓库根目录执行。
+
+1. 构建并安装 OpenClaw 插件：
 
 ```bash
 pnpm --dir plugins/openclaw build
@@ -223,11 +264,19 @@ rsync -a --delete \
   plugins/openclaw/openclaw.plugin.json \
   plugins/openclaw/package.json \
   ~/.openclaw/extensions/miloco-openclaw-plugin/
+```
 
+2. 安装 Miloco 后端代码到当前 `miloco-cli` 使用的 Python 环境：
+
+```bash
 uv pip install --python ~/.local/share/uv/tools/miloco/bin/python \
   -e backend/miot -e backend/miloco
+```
 
-~/.local/bin/supervisorctl -c ~/.openclaw/miloco/supervisord.conf restart miloco-backend
+3. 重启 Miloco 后端和 OpenClaw gateway：
+
+```bash
+miloco-cli service restart
 openclaw gateway restart
 ```
 
@@ -239,6 +288,36 @@ openclaw doctor --fix
 ```
 
 修复配置后再重启 gateway。
+
+4. 确认门铃事件订阅成功：
+
+```bash
+tail -n 200 ~/.openclaw/miloco/log/miloco-backend.log \
+  | rg 'mips_cloud subscribed device events|doorbell event subscription synced|subscribe doorbell event failed'
+```
+
+成功时应该看到：
+
+```text
+mips_cloud subscribed device events topic=device/<doorbell_did>/up/event_occured/#
+doorbell event subscription synced: did=<doorbell_did> siid=<doorbell_siid> eiid=<doorbell_eiid>
+```
+
+如果看到 `subscribe doorbell event failed ... Not authorized`，通常是 MIoT MQTT 连接刚建立后的临时授权状态；先再执行一次 `miloco-cli service restart`，然后重新查看上述订阅日志。不要在没有订阅成功日志时做端到端测试，否则门铃事件不会进入会话。
+
+5. 确认运行配置已生效：
+
+```bash
+miloco-cli config show | rg 'doorbell_(did|siid|eiid|session_key|wake_action_iid|speech_source_dids|visitor_listen_seconds|silence_fallback)'
+```
+
+重点确认：
+
+- `doorbell_did` 是产生门铃事件的门锁 DID。
+- `doorbell_siid` / `doorbell_eiid` 与日志中的门铃事件三元组一致。
+- `doorbell_session_key` 是目标 OpenClaw 会话。
+- `doorbell_speech_source_dids` 包含实际识别访客语音的摄像头 DID；如果不确定，先测试一次，再从 `realtime_perceive` 里的 `source_device_ids` 反查。
+- `doorbell_reply_audio_command` 指向可执行脚本，且脚本单独运行能播放到门锁。
 
 ## 8. 端到端验证
 
@@ -252,11 +331,18 @@ openclaw doctor --fix
    - 回复播放成功后，在门锁旁边说一句话，例如“我是快递员，我来取快递。”。
    - 目标 OpenClaw 会话继续收到 `门外访客说：我是快递员，我来取快递。`，并再次回复、再次播放到门锁。
 
+建议按三轮分开验证：
+
+1. **门铃事件链路**：只按门铃，不说话。确认目标会话收到门铃消息，门锁播放 OpenClaw 首轮回复；静默超时后播放 `doorbell_silence_fallback_text`。
+2. **访客语音链路**：按门铃，听完首轮回复后再说一句完整语音。确认目标会话出现 `门外访客说：...`，且门锁播放 OpenClaw 二轮回复。
+3. **来源 DID 链路**：如果语音没有进入门铃会话，先不要改 OpenClaw，查看 Miloco 日志中的 `doorbell speech ignored`。如果原因是 `source did mismatch`，把日志里的实际 `source_dids` 写入 `doorbell_speech_source_dids`，重启后再测。
+
 排查命令：
 
 ```bash
-# Miloco 后端是否收到门铃事件
-tail -n 300 ~/.openclaw/miloco/log/miloco-backend.log | rg 'doorbell|DOORBELL|Device event|<did>'
+# Miloco 后端是否收到门铃事件、创建会话、进入监听、接收访客语音
+tail -n 500 ~/.openclaw/miloco/log/miloco-backend.log \
+  | rg 'doorbell event received|doorbell speech source dids resolved|doorbell conversation handoff|doorbell conversation started|doorbell audio callback received|doorbell conversation listening|doorbell .*speech .*candidates|doorbell speech accepted|doorbell speech ignored|doorbell conversation silence timeout|<did>'
 
 # OpenClaw 是否执行音频链路
 tail -n 500 /tmp/openclaw/openclaw-$(date +%F).log | rg 'doorbell-reply-audio|audio_sender|edge-tts|ffmpeg|miloco-cli|<did>'
@@ -273,9 +359,9 @@ miloco-cli scope camera list | rg '<did>|voice_in_use'
 - `has_reply=False` 或没有 `responseText`：OpenClaw gateway 可能未重启加载新版 Miloco 插件。
 - `ModuleNotFoundError: No module named 'edge_tts'`：音频脚本用错 Python，改成装有 `edge_tts` 的绝对路径。
 - `audio command failed`：单独运行 `doorbell_reply_audio.sh '测试'`，先把脚本跑通。
-- 没收到门铃事件：重新按日志确认 `doorbell_did`、`doorbell_siid`、`doorbell_eiid`。
+- 没收到门铃事件：先确认有 `mips_cloud subscribed device events topic=device/<did>/up/event_occured/#`；再按日志确认 `doorbell_did`、`doorbell_siid`、`doorbell_eiid`。
 - 有回复但无声音：确认 OpenClaw 日志里唤醒 action 和音频命令没有失败，确认门锁 IP/端口可达。
-- 有第一次播放但访客说话没进会话：确认播放成功回调日志、门锁拾音开关、`doorbell_visitor_listen_seconds` 窗口，以及语音识别结果是否 `is_complete=true`。
+- 有第一次播放但访客说话没进会话：确认播放成功回调日志、门锁拾音开关、`doorbell_visitor_listen_seconds` 窗口、语音识别结果是否 `is_complete=true`，以及 `doorbell_speech_source_dids` 是否覆盖实际 `source_device_ids`。
 - 访客不说话没有兜底音：确认 `doorbell_silence_fallback_enabled=true`，以及 OpenClaw 日志中 `doorbell_reply_audio` action 没有播放失败。
 
 ## 9. 代码入口

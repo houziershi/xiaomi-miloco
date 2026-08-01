@@ -265,6 +265,10 @@ class MiotSettings(BaseModel):
         default=None,
         description="播放 OpenClaw 回复文本的外部命令参数列表；为空则不播放。支持 {text}/{did} 等占位符。",
     )
+    doorbell_speech_source_dids: list[str] = Field(
+        default=[],
+        description="门铃会话额外接受的访客语音来源 did 列表；用于门铃事件 did 与实际拾音摄像头 did 不一致的设备。",
+    )
     doorbell_conversation_enabled: bool = Field(
         default=True,
         description="是否启用门铃双向语音对话；启用后播放回复成功才进入访客拾音窗口。",

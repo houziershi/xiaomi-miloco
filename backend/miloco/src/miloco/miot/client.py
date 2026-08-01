@@ -980,25 +980,38 @@ class MiotProxy:
         if value is not None:
             text += f"。事件值：{value}"
         logger.info(
-            "doorbell event received did=%s siid=%s eiid=%s value=%s",
+            "doorbell event received did=%s siid=%s eiid=%s value=%s device_name=%s room_name=%s conversation_enabled=%s audio_command_configured=%s",
             msg.did,
             msg.siid,
             msg.eiid,
             value,
+            device_name,
+            room_name,
+            settings.doorbell_conversation_enabled,
+            bool(settings.doorbell_reply_audio_command),
         )
         if settings.doorbell_session_key:
             if (
                 settings.doorbell_conversation_enabled
                 and settings.doorbell_reply_audio_command
             ):
+                speech_source_dids = self._doorbell_speech_source_dids(
+                    msg.did, device_name
+                )
+                logger.info(
+                    "doorbell conversation handoff did=%s siid=%s eiid=%s session_key=%s speech_source_dids=%s",
+                    msg.did,
+                    msg.siid,
+                    msg.eiid,
+                    settings.doorbell_session_key,
+                    sorted(speech_source_dids),
+                )
                 await get_doorbell_conversation_service().start(
                     did=msg.did,
                     siid=msg.siid,
                     eiid=msg.eiid,
                     text=text,
-                    speech_source_dids=self._doorbell_speech_source_dids(
-                        msg.did, device_name
-                    ),
+                    speech_source_dids=speech_source_dids,
                 )
                 return
 
@@ -1033,18 +1046,43 @@ class MiotProxy:
         name is the same lock name with a numeric suffix (for example
         ``小米智能门锁 5 Max 内外双摄`` and ``... 内外双摄 2``).
         """
-        source_dids = {did}
+        source_dids = {
+            source_did.strip()
+            for source_did in get_settings().miot.doorbell_speech_source_dids
+            if source_did.strip()
+        }
+        configured_source_dids = set(source_dids)
+        source_dids.add(did)
         base_name = (device_name or "").strip()
         if not base_name:
+            logger.info(
+                "doorbell speech source dids resolved did=%s device_name=%s configured=%s auto=[] result=%s",
+                did,
+                device_name,
+                sorted(configured_source_dids),
+                sorted(source_dids),
+            )
             return source_dids
+        auto_source_dids: set[str] = set()
         for camera_did, camera in self._camera_info_dict.items():
             camera_name = (getattr(camera, "name", "") or "").strip()
             if camera_did == did or camera_name == base_name:
+                auto_source_dids.add(camera_did)
                 source_dids.add(camera_did)
             elif camera_name.startswith(f"{base_name} "):
                 suffix = camera_name.removeprefix(base_name).strip()
                 if suffix.isdigit():
+                    auto_source_dids.add(camera_did)
                     source_dids.add(camera_did)
+        logger.info(
+            "doorbell speech source dids resolved did=%s device_name=%s configured=%s auto=%s result=%s camera_cache_size=%s",
+            did,
+            device_name,
+            sorted(configured_source_dids),
+            sorted(auto_source_dids),
+            sorted(source_dids),
+            len(self._camera_info_dict),
+        )
         return source_dids
 
     def _is_move_into_scope(self, msg: MIoTDeviceBindEvent) -> bool:

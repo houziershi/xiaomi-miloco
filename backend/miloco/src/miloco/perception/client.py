@@ -460,11 +460,24 @@ class PerceptionEngineProxy:
             doorbell_candidates = _filter_voice_enabled(
                 [i for i in speeches if i.is_complete]
             )
+            if doorbell_candidates:
+                logger.info(
+                    "doorbell early speech candidates count=%s contents=%s source_dids=%s",
+                    len(doorbell_candidates),
+                    [speech.content for speech in doorbell_candidates],
+                    [speech.source_device_ids for speech in doorbell_candidates],
+                )
             for speech in doorbell_candidates:
                 if await get_doorbell_conversation_service().accept_speech(speech):
+                    logger.info(
+                        "doorbell early speech consumed content=%s source_dids=%s",
+                        speech.content,
+                        speech.source_device_ids,
+                    )
                     early_sent_contents.add(speech.content)
             commands = [
                 i for i in speeches if i.needs_response and i.is_complete
+                and i.content not in early_sent_contents
             ]
             # 按摄像头语音开关闸门:被拉黑的相机语音指令不 dispatch(实时读 KV)。
             commands = _filter_voice_enabled(commands)
@@ -854,10 +867,23 @@ class PerceptionEngineProxy:
         doorbell_candidates = _filter_voice_enabled(
             [i for i in result.speeches if i.is_complete]
         )
+        if doorbell_candidates:
+            logger.info(
+                "doorbell final speech candidates count=%s contents=%s source_dids=%s early_sent=%s",
+                len(doorbell_candidates),
+                [speech.content for speech in doorbell_candidates],
+                [speech.source_device_ids for speech in doorbell_candidates],
+                sorted(early_sent_contents),
+            )
         for interaction in doorbell_candidates:
             if early_sent_contents and interaction.content in early_sent_contents:
                 continue
             if await get_doorbell_conversation_service().accept_speech(interaction):
+                logger.info(
+                    "doorbell final speech consumed content=%s source_dids=%s",
+                    interaction.content,
+                    interaction.source_device_ids,
+                )
                 early_sent_contents.add(interaction.content)
 
         speeches: list[Speech] = []

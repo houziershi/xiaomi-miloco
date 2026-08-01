@@ -5,9 +5,10 @@
 ```text
 门锁门铃事件 → Miloco 后端 → 指定 OpenClaw 会话 → OpenClaw 回复文本
 → OpenClaw 插件先唤醒门锁 → OpenClaw 侧生成/转换音频 → audio_sender 发送到门锁播放
+→ 播放成功回调 Miloco → Miloco 监听门外访客语音 → 转写继续进入同一 OpenClaw 会话
 ```
 
-职责边界：Miloco 只识别 MIoT 门铃事件并把 `doorbellReplyAudio` 请求交给 OpenClaw；OpenClaw 负责拿到回复文本后执行唤醒、TTS、PCM 转码和门锁音频发送。
+职责边界：Miloco 识别 MIoT 门铃事件、维护本次门铃会话状态、接收播放结果回调并转发访客语音；OpenClaw 负责拿到回复文本后执行唤醒、TTS、PCM 转码和门锁音频发送。
 
 ## 1. 前置条件
 
@@ -16,6 +17,7 @@
 - 门锁与运行 OpenClaw/Miloco 的本机处于可互通网络，`audio_sender` 能连到门锁音频服务端口。
 - 本机已有可用 TTS 能力。当前验证路径使用 OpenClaw workspace 里的 `edge-tts` skill，再用 `ffmpeg` 转 16 kHz PCM。
 - 本机已安装 `ffmpeg`、能运行 `miloco-cli`、能运行 `audio_sender`。
+- 门锁设备已允许拾音：门锁/摄像头 did 需要在 `CAMERA_VOICE_ALLOW_LIST_KEY` 或 Web 端“语音”开关里启用。
 
 ## 2. 找到门铃事件三元组
 
@@ -159,6 +161,43 @@ miloco-cli config set miot.doorbell_wake_action_iid 'action.17.3'
 
 Miloco 会把这些值传给 OpenClaw 插件；OpenClaw 插件会先执行唤醒 action，再执行音频命令。
 
+双向对话相关配置：
+
+- `doorbell_conversation_enabled`：是否启用门铃双向语音对话，默认 `true`。关闭后只做单次门铃消息和回复播放，不监听访客语音。
+- `doorbell_visitor_listen_seconds`：每次门锁回复音频播放成功后，等待访客说话的窗口，默认 `15.0` 秒。
+- `doorbell_max_turns`：单次门铃会话最多接收并转发的访客语音轮数，默认 `3`。
+- `doorbell_visitor_message_prefix`：访客转写发给 OpenClaw 时的前缀，默认 `门外访客说：`。
+
+示例完整配置：
+
+```json
+{
+  "miot": {
+    "doorbell_did": "<did>",
+    "doorbell_siid": 7,
+    "doorbell_eiid": 1006,
+    "doorbell_session_key": "agent:main:dashboard:xxxx",
+    "doorbell_wake_action_iid": "action.17.3",
+    "doorbell_reply_audio_command": [
+      "/Users/<you>/.openclaw/miloco/scripts/doorbell_reply_audio.sh",
+      "{text}"
+    ],
+    "doorbell_conversation_enabled": true,
+    "doorbell_visitor_listen_seconds": 15.0,
+    "doorbell_max_turns": 3,
+    "doorbell_visitor_message_prefix": "门外访客说："
+  }
+}
+```
+
+会话规则：
+
+- 门铃事件会附加 OpenClaw 系统提示，让回复尽量短、适合直接播放。
+- OpenClaw 回复文本播放成功后，Miloco 才进入访客拾音窗口。
+- 如果唤醒门锁或播放音频失败，OpenClaw 会回调失败，Miloco 结束本次门铃会话，不再监听访客语音。
+- 访客语音必须满足 `is_complete=true` 且来源 did 匹配门锁 did，才会转发为 `门外访客说：...`。
+- 每次访客语音进入同一 OpenClaw 会话后，OpenClaw 的新回复会再次唤醒门锁并播放。
+
 ## 7. 安装/重启服务
 
 开发分支本地验证时，从仓库根目录执行：
@@ -197,6 +236,8 @@ openclaw doctor --fix
    - 目标 OpenClaw 会话收到门铃消息并回复文本。
    - OpenClaw 插件日志不出现 `[doorbell-reply-audio] ... failed`。
    - 门锁被唤醒并播放 OpenClaw 回复音频。
+   - 回复播放成功后，在门锁旁边说一句话，例如“我是快递员，我来取快递。”。
+   - 目标 OpenClaw 会话继续收到 `门外访客说：我是快递员，我来取快递。`，并再次回复、再次播放到门锁。
 
 排查命令：
 
@@ -209,6 +250,9 @@ tail -n 500 /tmp/openclaw/openclaw-$(date +%F).log | rg 'doorbell-reply-audio|au
 
 # 当前生效配置
 miloco-cli config show | rg 'doorbell'
+
+# 门锁拾音是否开启
+miloco-cli scope camera list | rg '<did>|voice_in_use'
 ```
 
 常见错误：
@@ -218,10 +262,14 @@ miloco-cli config show | rg 'doorbell'
 - `audio command failed`：单独运行 `doorbell_reply_audio.sh '测试'`，先把脚本跑通。
 - 没收到门铃事件：重新按日志确认 `doorbell_did`、`doorbell_siid`、`doorbell_eiid`。
 - 有回复但无声音：确认 OpenClaw 日志里唤醒 action 和音频命令没有失败，确认门锁 IP/端口可达。
+- 有第一次播放但访客说话没进会话：确认播放成功回调日志、门锁拾音开关、`doorbell_visitor_listen_seconds` 窗口，以及语音识别结果是否 `is_complete=true`。
 
 ## 9. 代码入口
 
 - MIoT 门铃事件订阅与过滤：`backend/miloco/src/miloco/miot/client.py`
+- 门铃双向会话状态机：`backend/miloco/src/miloco/doorbell/conversation.py`
+- 播放成功/失败回调接口：`backend/miloco/src/miloco/miot/router.py`
+- 访客语音转发入口：`backend/miloco/src/miloco/perception/client.py`
 - Miloco → OpenClaw webhook payload：`backend/miloco/src/miloco/utils/agent_client.py`
 - OpenClaw 回复文本提取：`plugins/openclaw/src/hooks/trace.ts`
 - OpenClaw 侧唤醒与播放：`plugins/openclaw/src/webhooks/agent.ts`

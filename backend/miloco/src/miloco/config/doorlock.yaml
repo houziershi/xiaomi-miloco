@@ -64,3 +64,27 @@ miot:
   #   如果脚本需要先把文本转 PCM，再用 audio_sender 发到门锁，可把这些步骤封装到一个脚本里，
   #   然后在这里配置该脚本路径和 {text} 参数。
   doorbell_reply_audio_command: null
+
+  # doorbell_conversation_enabled
+  #   是否启用门铃双向语音对话。
+  #   true 时：门铃事件进入固定 OpenClaw 会话；OpenClaw 回复播放成功后，Miloco 才监听
+  #   门锁旁边的访客语音，并把转写继续发回同一个会话。
+  #   false 时：只保留单次门铃事件投递/回复播放，不进入访客拾音和自动追问循环。
+  doorbell_conversation_enabled: true
+
+  # doorbell_visitor_listen_seconds
+  #   每次门锁回复音频播放成功后，等待访客说话的窗口（秒）。
+  #   超过窗口未收到 is_complete=true 且来源 did 匹配的语音，本轮会话结束。
+  doorbell_visitor_listen_seconds: 15.0
+
+  # doorbell_max_turns
+  #   单次门铃会话最多接收并转发的访客语音轮数。
+  #   例如 3 表示最多转发 3 次“门外访客说：...”，第三次后的 OpenClaw 回复仍会播放，
+  #   但播放完成后不再进入新的访客拾音窗口。
+  doorbell_max_turns: 3
+
+  # doorbell_visitor_message_prefix
+  #   访客语音转写进入 OpenClaw 会话时的前缀。
+  #   默认消息形如：门外访客说：我是快递员，我来取快递。
+  #   建议保留清晰角色标记，方便 OpenClaw 区分门外访客和屋主/系统消息。
+  doorbell_visitor_message_prefix: 门外访客说：

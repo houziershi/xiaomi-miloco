@@ -4,6 +4,7 @@ import {
   registerTraceLink,
 } from "../hooks/trace.js";
 import { writeOnboardingInviteState } from "../home-profile/onboarding_state.js";
+import { loadSharedConfig } from "../miloco/config.js";
 import { resolveNotifyTarget } from "../tools/notify.js";
 import { logger } from "../utils/logger.js";
 import { runShell } from "../utils/shell.js";
@@ -18,6 +19,7 @@ const META_POLL_TIMEOUT_MS = 2_000;
 const META_POLL_INTERVAL_MS = 100;
 
 interface DoorbellReplyAudioRequest {
+  conversationId?: string;
   did: string;
   siid?: number;
   eiid?: number;
@@ -89,6 +91,7 @@ function formatCommandPart(part: string, values: Record<string, string>): string
 }
 
 async function runDoorbellReplyAudio(
+  api: Parameters<WebhookEntry["action"]>[0]["api"],
   request: DoorbellReplyAudioRequest | undefined,
   responseText: string | null | undefined,
 ) {
@@ -105,9 +108,11 @@ async function runDoorbellReplyAudio(
     wakeActionIid,
   ]);
   if (wake.status !== 0 || wake.error) {
+    const error = `wake failed: ${wake.error?.message ?? wake.stderr}`;
     logger.error(
       `[doorbell-reply-audio] wake failed did=${request.did} iid=${wakeActionIid} status=${wake.status} error=${wake.error?.message ?? wake.stderr}`,
     );
+    await reportDoorbellReplyAudioResult(api, request, false, error);
     return;
   }
 
@@ -123,9 +128,53 @@ async function runDoorbellReplyAudio(
   );
   const audio = await runShell(command, args);
   if (audio.status !== 0 || audio.error) {
+    const error = `audio command failed: ${audio.error?.message ?? audio.stderr}`;
     logger.error(
       `[doorbell-reply-audio] audio command failed did=${request.did} status=${audio.status} error=${audio.error?.message ?? audio.stderr}`,
     );
+    await reportDoorbellReplyAudioResult(api, request, false, error);
+    return;
+  }
+  await reportDoorbellReplyAudioResult(api, request, true);
+}
+
+async function reportDoorbellReplyAudioResult(
+  api: Parameters<WebhookEntry["action"]>[0]["api"],
+  request: DoorbellReplyAudioRequest,
+  success: boolean,
+  error?: string,
+) {
+  if (!request.conversationId) return;
+  try {
+    const sharedConfig = loadSharedConfig(api);
+    const baseUrl = sharedConfig.server.url.replace(/\/+$/, "");
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (sharedConfig.server.token) {
+      headers.Authorization = `Bearer ${sharedConfig.server.token}`;
+    }
+    const response = await fetch(
+      `${baseUrl}/api/miot/doorbell/reply-audio-result`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          conversationId: request.conversationId,
+          did: request.did,
+          success,
+          ...(error ? { error } : {}),
+        }),
+      },
+    );
+    if (!response.ok) {
+      logger.error(
+        `[doorbell-reply-audio] callback failed status=${response.status} body=${await response.text()}`,
+      );
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error(`[doorbell-reply-audio] callback failed error=${message}`);
   }
 }
 
@@ -307,7 +356,7 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
         const retryResponseText = (
           await waitTurnMeta(retry.runId, META_POLL_TIMEOUT_MS)
         )?.responseText;
-        await runDoorbellReplyAudio(doorbellReplyAudio, retryResponseText);
+        await runDoorbellReplyAudio(api, doorbellReplyAudio, retryResponseText);
         return {
           runId: retry.runId,
           status: retry.wait.status,
@@ -326,7 +375,7 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
       }
     }
 
-    await runDoorbellReplyAudio(doorbellReplyAudio, firstMeta?.responseText);
+    await runDoorbellReplyAudio(api, doorbellReplyAudio, firstMeta?.responseText);
     return {
       runId: first.runId,
       status: first.wait.status,

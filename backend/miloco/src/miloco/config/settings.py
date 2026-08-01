@@ -265,6 +265,22 @@ class MiotSettings(BaseModel):
         default=None,
         description="播放 OpenClaw 回复文本的外部命令参数列表；为空则不播放。支持 {text}/{did} 等占位符。",
     )
+    doorbell_conversation_enabled: bool = Field(
+        default=True,
+        description="是否启用门铃双向语音对话；启用后播放回复成功才进入访客拾音窗口。",
+    )
+    doorbell_visitor_listen_seconds: float = Field(
+        default=15.0,
+        description="每次门锁回复音频播放成功后，等待门外访客说话的时间窗口（秒）。",
+    )
+    doorbell_max_turns: int = Field(
+        default=3,
+        description="单次门铃会话最多接收并转发的访客语音轮数；达到后结束会话。",
+    )
+    doorbell_visitor_message_prefix: str = Field(
+        default="门外访客说：",
+        description="转发访客语音到 OpenClaw 会话时附加在转写文本前的前缀。",
+    )
 
 
 class NotifySettings(BaseModel):

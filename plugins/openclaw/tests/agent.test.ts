@@ -40,6 +40,14 @@ vi.mock("../src/utils/shell.js", () => ({
   runShell: (...args: unknown[]) => runShellMock(...args),
 }));
 
+const loadSharedConfigMock = vi.fn((_api: unknown) => ({
+  server: { url: "http://127.0.0.1:1810", token: "miloco-token" },
+}));
+
+vi.mock("../src/miloco/config.js", () => ({
+  loadSharedConfig: (api: unknown) => loadSharedConfigMock(api),
+}));
+
 import { kAgentWebhook } from "../src/webhooks/agent.js";
 
 const OVERFLOW = "Context overflow: prompt too large for the model (precheck).";
@@ -87,11 +95,16 @@ beforeEach(() => {
     signal: null,
     error: null,
   });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({ ok: true, status: 200, text: async () => "ok" })),
+  );
 });
 
 afterEach(() => {
   vi.clearAllMocks();
   getTurnStatusMock.mockReturnValue("done");
+  vi.unstubAllGlobals();
 });
 
 describe("kAgentWebhook 上下文溢出自愈", () => {
@@ -112,6 +125,7 @@ describe("kAgentWebhook 上下文溢出自愈", () => {
         traceId: "tr",
         timeoutMs: 1000,
         doorbellReplyAudio: {
+          conversationId: "conv-1",
           did: "1179479632",
           siid: 7,
           eiid: 1006,
@@ -139,6 +153,59 @@ describe("kAgentWebhook 上下文溢出自愈", () => {
       "1179479632",
       "7.1006",
     ]);
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:1810/api/miot/doorbell/reply-audio-result",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ Authorization: "Bearer miloco-token" }),
+        body: JSON.stringify({
+          conversationId: "conv-1",
+          did: "1179479632",
+          success: true,
+        }),
+      }),
+    );
+  });
+
+  it("doorbellReplyAudio：播放失败后回调 failure", async () => {
+    peekTurnMetaMock.mockImplementation(() => ({
+      success: true,
+      errorMsg: null,
+      responseText: "请稍等。",
+    }));
+    runShellMock
+      .mockResolvedValueOnce({ status: 0, stdout: "", stderr: "", signal: null, error: null })
+      .mockResolvedValueOnce({ status: 1, stdout: "", stderr: "boom", signal: null, error: null });
+    const { api } = makeApi({ waitByRunId: { t1: { status: "ok" } } });
+
+    await kAgentWebhook.action({
+      api,
+      payload: {
+        message: "门铃被按下",
+        sessionKey: SESSION,
+        idempotencyKey: "t1",
+        traceId: "tr",
+        timeoutMs: 1000,
+        doorbellReplyAudio: {
+          conversationId: "conv-2",
+          did: "1179479632",
+          wakeActionIid: "action.17.3",
+          audioCommand: ["/tmp/play-doorlock-audio", "{text}"],
+        },
+      },
+    } as never);
+
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:1810/api/miot/doorbell/reply-audio-result",
+      expect.objectContaining({
+        body: JSON.stringify({
+          conversationId: "conv-2",
+          did: "1179479632",
+          success: false,
+          error: "audio command failed: boom",
+        }),
+      }),
+    );
   });
 
   it("溢出 → deleteSession 一次 → 重试成功 → recovered=true", async () => {

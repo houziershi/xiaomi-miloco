@@ -38,6 +38,7 @@ from pydantic_core import to_jsonable_python
 from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
 from miloco.dispatch.dispatcher import dispatch_event
+from miloco.doorbell.conversation import get_doorbell_conversation_service
 from miloco.miot.camera_handler import CameraVisionHandler
 from miloco.miot.filter import (
     is_home_allowed,
@@ -314,7 +315,7 @@ class MiotProxy:
         # disconnect window may have caused us to miss events. Registered AFTER
         # init_async on purpose: the first connect during setup should not
         # pre-empt the initial full refresh done by refresh_miot_info below.
-        self._miot_client.register_mips_connect_callback(self.refresh_devices)
+        self._miot_client.register_mips_connect_callback(self._on_mips_connected)
         await self.refresh_miot_info()
 
         if self._token_refresh_task:
@@ -836,7 +837,12 @@ class MiotProxy:
             logger.warning("refresh awake cache failed: %s", e)
         return self._camera_info_dict
 
-    async def refresh_devices(self) -> dict[str, MIoTDeviceInfo] | None:
+    async def _on_mips_connected(self) -> dict[str, MIoTDeviceInfo] | None:
+        return await self.refresh_devices(force_doorbell_subscription=True)
+
+    async def refresh_devices(
+        self, *, force_doorbell_subscription: bool = False
+    ) -> dict[str, MIoTDeviceInfo] | None:
         async with self._refresh_devices_lock:
             try:
                 devices = await self._miot_client.get_devices_async()
@@ -844,7 +850,9 @@ class MiotProxy:
                 await self._sync_meta_subscriptions()
                 await self._sync_scene_subscriptions()
                 await self._sync_lock_device_subscriptions()
-                await self._sync_doorbell_subscription()
+                await self._sync_doorbell_subscription(
+                    force=force_doorbell_subscription
+                )
                 return devices
             except Exception as e:
                 logger.error("Failed to refresh devices: %s", e)
@@ -979,6 +987,18 @@ class MiotProxy:
             value,
         )
         if settings.doorbell_session_key:
+            if (
+                settings.doorbell_conversation_enabled
+                and settings.doorbell_reply_audio_command
+            ):
+                await get_doorbell_conversation_service().start(
+                    did=msg.did,
+                    siid=msg.siid,
+                    eiid=msg.eiid,
+                    text=text,
+                )
+                return
+
             trace_id = str(uuid.uuid4())
             extra_payload = None
             if settings.doorbell_reply_audio_command:
@@ -1082,7 +1102,7 @@ class MiotProxy:
             len(self._subscribed_meta_dids),
         )
 
-    async def _sync_doorbell_subscription(self) -> None:
+    async def _sync_doorbell_subscription(self, *, force: bool = False) -> None:
         """Subscribe configured doorbell device events, if any."""
         settings = get_settings().miot
         did = (settings.doorbell_did or "").strip()
@@ -1092,7 +1112,7 @@ class MiotProxy:
             else None
         )
         current = self._subscribed_doorbell_event
-        if current == target:
+        if current == target and not force:
             return
 
         if current is not None:

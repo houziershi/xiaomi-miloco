@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from miloco.config import reset_settings
+from miloco.doorbell import conversation as conversation_module
 from miloco.miot import client as client_module
 from miloco.miot.client import MiotProxy
 from miot.types import MIoTDeviceEvent
@@ -41,6 +42,17 @@ async def test_sync_doorbell_subscription_uses_configured_event():
     proxy = _bare_proxy()
 
     await proxy._sync_doorbell_subscription()
+
+    proxy._miot_client.sub_device_events_async.assert_awaited_once_with("door-did")
+    assert proxy._subscribed_doorbell_event == ("door-did", 7, 1006)
+
+
+@pytest.mark.asyncio
+async def test_sync_doorbell_subscription_force_retries_existing_target():
+    proxy = _bare_proxy()
+    proxy._subscribed_doorbell_event = ("door-did", 7, 1006)
+
+    await proxy._sync_doorbell_subscription(force=True)
 
     proxy._miot_client.sub_device_events_async.assert_awaited_once_with("door-did")
     assert proxy._subscribed_doorbell_event == ("door-did", 7, 1006)
@@ -85,22 +97,24 @@ async def test_doorbell_event_requests_openclaw_reply_audio(monkeypatch):
     )
     reset_settings()
 
-    run_turn = AsyncMock(return_value=("run-1", "ok", 123.0))
-    monkeypatch.setattr(client_module, "run_agent_turn", run_turn)
+    run_turn = AsyncMock(return_value=("run-1", "ok", 123.0, "请说"))
+    monkeypatch.setattr(conversation_module, "run_agent_turn_detailed", run_turn)
 
     await proxy._on_device_event(MIoTDeviceEvent(did="door-did", siid=7, eiid=1006))
 
     proxy._miot_client.http_client.action_async.assert_not_awaited()
     run_turn.assert_awaited_once()
-    assert run_turn.await_args.kwargs["extra_payload"] == {
-        "doorbellReplyAudio": {
-            "did": "door-did",
-            "siid": 7,
-            "eiid": 1006,
-            "wakeActionIid": "action.17.3",
-            "audioCommand": ["/bin/echo", "{did}", "{text}"],
-        }
+    payload = run_turn.await_args.kwargs["extra_payload"]
+    assert "你正在通过智能门锁和门外访客对话" in payload["extraSystemPrompt"]
+    assert payload["doorbellReplyAudio"] == {
+        "conversationId": payload["doorbellReplyAudio"]["conversationId"],
+        "did": "door-did",
+        "siid": 7,
+        "eiid": 1006,
+        "wakeActionIid": "action.17.3",
+        "audioCommand": ["/bin/echo", "{did}", "{text}"],
     }
+    assert payload["doorbellReplyAudio"]["conversationId"]
 
 
 @pytest.mark.asyncio

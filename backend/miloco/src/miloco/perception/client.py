@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from miloco.config import get_settings
 from miloco.dispatch import dispatch_event
+from miloco.doorbell.conversation import get_doorbell_conversation_service
 from miloco.node_monitor import Lifecycle, NodeName, get_monitor
 from miloco.observability.context import (
     get_trace_id,
@@ -456,6 +457,12 @@ class PerceptionEngineProxy:
 
         @_on_main_loop
         async def _on_early_speeches(speeches: list[Speech]) -> None:
+            doorbell_candidates = _filter_voice_enabled(
+                [i for i in speeches if i.is_complete]
+            )
+            for speech in doorbell_candidates:
+                if await get_doorbell_conversation_service().accept_speech(speech):
+                    early_sent_contents.add(speech.content)
             commands = [
                 i for i in speeches if i.needs_response and i.is_complete
             ]
@@ -844,6 +851,15 @@ class PerceptionEngineProxy:
             )
 
         # handle speeches (skip those already sent via streaming early callback)
+        doorbell_candidates = _filter_voice_enabled(
+            [i for i in result.speeches if i.is_complete]
+        )
+        for interaction in doorbell_candidates:
+            if early_sent_contents and interaction.content in early_sent_contents:
+                continue
+            if await get_doorbell_conversation_service().accept_speech(interaction):
+                early_sent_contents.add(interaction.content)
+
         speeches: list[Speech] = []
         for interaction in result.speeches:
             if interaction.needs_response and interaction.is_complete:

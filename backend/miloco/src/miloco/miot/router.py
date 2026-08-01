@@ -14,8 +14,10 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query, WebSocket
 from fastapi.responses import HTMLResponse, Response
 from fastapi.websockets import WebSocketDisconnect
+from pydantic import BaseModel, Field
 
 from miloco.config import get_settings
+from miloco.doorbell.conversation import get_doorbell_conversation_service
 from miloco.manager import get_manager
 from miloco.middleware import (
     BusinessException,
@@ -42,6 +44,13 @@ from miloco.schema.common_schema import NormalResponse
 from miloco.utils.common import escape_for_js_string
 
 logger = logging.getLogger(name=__name__)
+
+
+class DoorbellReplyAudioResultRequest(BaseModel):
+    conversation_id: str = Field(..., alias="conversationId")
+    did: str | None = None
+    success: bool
+    error: str | None = None
 
 
 def _truncate_ws_reason(reason: str) -> str:
@@ -474,6 +483,31 @@ async def send_notify(
     )
     await manager.miot_service.send_notify(request.notify)
     return NormalResponse(code=0, message="Notification sent successfully", data=None)
+
+
+@router.post(
+    path="/doorbell/reply-audio-result",
+    summary="Report doorbell reply audio playback result",
+    response_model=NormalResponse,
+)
+async def doorbell_reply_audio_result(
+    request: DoorbellReplyAudioResultRequest,
+    current_user: str = Depends(verify_token),
+):
+    logger.info(
+        "Doorbell reply audio callback, user=%s, conversation_id=%s, did=%s, success=%s, error=%s",
+        current_user,
+        request.conversation_id,
+        request.did,
+        request.success,
+        request.error,
+    )
+    accepted = get_doorbell_conversation_service().on_reply_audio_result(
+        request.conversation_id,
+        success=request.success,
+        error=request.error,
+    )
+    return NormalResponse(code=0, message="success", data={"accepted": accepted})
 
 
 

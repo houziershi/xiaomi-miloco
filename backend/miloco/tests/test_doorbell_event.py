@@ -75,7 +75,7 @@ async def test_doorbell_event_dispatches_visible_owner_message(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_doorbell_event_wakes_lock_and_plays_agent_reply(monkeypatch):
+async def test_doorbell_event_requests_openclaw_reply_audio(monkeypatch):
     proxy = _bare_proxy()
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:main:door")
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_WAKE_ACTION_IID", "action.17.3")
@@ -85,27 +85,20 @@ async def test_doorbell_event_wakes_lock_and_plays_agent_reply(monkeypatch):
     )
     reset_settings()
 
-    run_turn = AsyncMock(return_value=("run-1", "ok", 123.0, "请稍等，我马上来。"))
-    run_audio = AsyncMock(return_value=0)
-    monkeypatch.setattr(client_module, "run_agent_turn_detailed", run_turn)
-    monkeypatch.setattr(client_module, "_run_reply_audio_command", run_audio)
+    run_turn = AsyncMock(return_value=("run-1", "ok", 123.0))
+    monkeypatch.setattr(client_module, "run_agent_turn", run_turn)
 
     await proxy._on_device_event(MIoTDeviceEvent(did="door-did", siid=7, eiid=1006))
 
-    proxy._miot_client.http_client.action_async.assert_awaited_once()
-    action_param = proxy._miot_client.http_client.action_async.await_args.args[0]
-    assert action_param.did == "door-did"
-    assert action_param.siid == 17
-    assert action_param.aiid == 3
-    assert action_param.in_ == []
-    run_audio.assert_awaited_once()
-    settings, reply_text = run_audio.await_args.args
-    assert settings.doorbell_reply_audio_command == [
-        "/bin/echo",
-        "{did}",
-        "{text}",
-    ]
-    assert reply_text == "请稍等，我马上来。"
+    proxy._miot_client.http_client.action_async.assert_not_awaited()
+    run_turn.assert_awaited_once()
+    assert run_turn.await_args.kwargs["extra_payload"] == {
+        "doorbellReplyAudio": {
+            "did": "door-did",
+            "wakeActionIid": "action.17.3",
+            "audioCommand": ["/bin/echo", "{did}", "{text}"],
+        }
+    }
 
 
 @pytest.mark.asyncio

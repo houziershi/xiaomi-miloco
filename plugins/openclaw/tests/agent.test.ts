@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // 控制 trace 检测信号：getTurnStatus 恒 "done"（不睡眠），peekTurnMeta 按 runId 返回 meta。
 type TurnMeta = { success: boolean; errorMsg: string | null } | undefined;
@@ -32,6 +32,12 @@ const resolveNotifyTargetMock = vi.fn<() => ResolveResultLike>(() => ({
 
 vi.mock("../src/tools/notify.js", () => ({
   resolveNotifyTarget: () => resolveNotifyTargetMock(),
+}));
+
+const runShellMock = vi.fn();
+
+vi.mock("../src/utils/shell.js", () => ({
+  runShell: (...args: unknown[]) => runShellMock(...args),
 }));
 
 import { kAgentWebhook } from "../src/webhooks/agent.js";
@@ -73,12 +79,60 @@ function invoke(api: unknown, idempotencyKey = "t1") {
   } as never);
 }
 
+beforeEach(() => {
+  runShellMock.mockResolvedValue({
+    status: 0,
+    stdout: "",
+    stderr: "",
+    signal: null,
+    error: null,
+  });
+});
+
 afterEach(() => {
   vi.clearAllMocks();
   getTurnStatusMock.mockReturnValue("done");
 });
 
 describe("kAgentWebhook 上下文溢出自愈", () => {
+  it("doorbellReplyAudio：OpenClaw 回复后先唤醒门锁，再播放回复音频", async () => {
+    peekTurnMetaMock.mockImplementation(() => ({
+      success: true,
+      errorMsg: null,
+      responseText: "请稍等，我马上来。",
+    }));
+    const { api } = makeApi({ waitByRunId: { t1: { status: "ok" } } });
+
+    const res = (await kAgentWebhook.action({
+      api,
+      payload: {
+        message: "门铃被按下",
+        sessionKey: SESSION,
+        idempotencyKey: "t1",
+        traceId: "tr",
+        timeoutMs: 1000,
+        doorbellReplyAudio: {
+          did: "1179479632",
+          wakeActionIid: "action.17.3",
+          audioCommand: ["/tmp/play-doorlock-audio", "{text}", "{did}"],
+        },
+      },
+    } as never)) as { responseText?: string };
+
+    expect(res.responseText).toBe("请稍等，我马上来。");
+    expect(runShellMock).toHaveBeenCalledTimes(2);
+    expect(runShellMock).toHaveBeenNthCalledWith(1, "miloco-cli", [
+      "device",
+      "action",
+      "1179479632",
+      "action.17.3",
+    ]);
+    expect(runShellMock).toHaveBeenNthCalledWith(2, "/tmp/play-doorlock-audio", [
+      "请稍等，我马上来。",
+      "1179479632",
+    ]);
+  });
+
   it("溢出 → deleteSession 一次 → 重试成功 → recovered=true", async () => {
     peekTurnMetaMock.mockImplementation((runId: string) =>
       runId === "t1"

@@ -49,8 +49,10 @@ miot:
   doorbell_wake_action_iid: action.17.3
 
   # doorbell_reply_audio_command
-  #   播放 OpenClaw 回复文本的外部命令参数列表。Miloco 不启 shell，按数组直接执行。
-  #   为空（null）时不播放音频；适合先只验证“收到事件并生成回复”。
+  #   播放 OpenClaw 回复文本的外部命令参数列表。Miloco 只把该请求随 webhook 交给
+  #   OpenClaw 插件；真正的 TTS、ffmpeg 转码、audio_sender 发送都在 OpenClaw 侧执行。
+  #   OpenClaw 插件会先执行 doorbell_wake_action_iid 唤醒门锁，再执行该音频命令。
+  #   为空（null）时不请求 OpenClaw 播放音频；适合先只验证“收到事件并生成回复”。
   #   支持占位符：
   #     {text}  OpenClaw 回复文本
   #     {did}   门锁 did

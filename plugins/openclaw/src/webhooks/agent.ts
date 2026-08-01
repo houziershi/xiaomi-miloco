@@ -6,6 +6,7 @@ import {
 import { writeOnboardingInviteState } from "../home-profile/onboarding_state.js";
 import { resolveNotifyTarget } from "../tools/notify.js";
 import { logger } from "../utils/logger.js";
+import { runShell } from "../utils/shell.js";
 import type { WebhookEntry } from "./index.js";
 
 // waitForRun 兜底超时: backend 不传 timeoutMs 时用此值(对齐 backend WAIT_MS)。
@@ -15,6 +16,12 @@ const RETRY_WAIT_MS = 60_000;
 // trace meta 由 subagent_ended + setImmediate 写入,可能略滞后 waitForRun 返回; 短轮询兜住。
 const META_POLL_TIMEOUT_MS = 2_000;
 const META_POLL_INTERVAL_MS = 100;
+
+interface DoorbellReplyAudioRequest {
+  did: string;
+  wakeActionIid?: string;
+  audioCommand?: string[];
+}
 
 interface IRequestBody {
   message: string;
@@ -35,6 +42,8 @@ interface IRequestBody {
   // habit-suggest 等高频低负载场景）。owner-channel 模式强制忽略此字段（延续
   // 完整上下文）。
   lightContext?: boolean;
+  // 门锁门铃专用：OpenClaw 回复后，在 OpenClaw 侧先唤醒门锁，再播放回复音频。
+  doorbellReplyAudio?: DoorbellReplyAudioRequest;
 }
 
 interface WaitResult {
@@ -70,6 +79,47 @@ function isContextOverflow(text: string | null | undefined): boolean {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+function formatCommandPart(part: string, values: Record<string, string>): string {
+  return part.replaceAll(/\{(text|did|wakeActionIid)\}/g, (_match, key) =>
+    values[key] ?? "",
+  );
+}
+
+async function runDoorbellReplyAudio(
+  request: DoorbellReplyAudioRequest | undefined,
+  responseText: string | null | undefined,
+) {
+  const text = responseText?.trim();
+  if (!request || !request.did || !text) return;
+  const wakeActionIid = request.wakeActionIid?.trim() || "action.17.3";
+  const audioCommand = request.audioCommand?.filter((part) => part.trim());
+  if (!audioCommand?.length) return;
+
+  const wake = await runShell("miloco-cli", [
+    "device",
+    "action",
+    request.did,
+    wakeActionIid,
+  ]);
+  if (wake.status !== 0 || wake.error) {
+    logger.error(
+      `[doorbell-reply-audio] wake failed did=${request.did} iid=${wakeActionIid} status=${wake.status} error=${wake.error?.message ?? wake.stderr}`,
+    );
+    return;
+  }
+
+  const values = { text, did: request.did, wakeActionIid };
+  const [command, ...args] = audioCommand.map((part) =>
+    formatCommandPart(part, values),
+  );
+  const audio = await runShell(command, args);
+  if (audio.status !== 0 || audio.error) {
+    logger.error(
+      `[doorbell-reply-audio] audio command failed did=${request.did} status=${audio.status} error=${audio.error?.message ?? audio.stderr}`,
+    );
+  }
+}
 
 // 等本 run 的 trace meta 落定(done)后返回;超时仍未 done 返 undefined(按非溢出处理,安全降级)。
 async function waitTurnMeta(runId: string, timeoutMs: number) {
@@ -113,6 +163,7 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
       deliver,
       resolveTarget,
       lightContext,
+      doorbellReplyAudio,
     } = payload;
     // 自愈双 turn 串联须留在 backend HTTP 超时内，startedAt 用于给重试 turn 算剩余等待预算。
     const startedAt = Date.now();
@@ -245,6 +296,10 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
             `[overflow-self-heal] still overflow after reset; session=${effectiveSessionKey} unrecoverable by delete (system prompt likely exceeds context budget)`,
           );
         }
+        const retryResponseText = (
+          await waitTurnMeta(retry.runId, META_POLL_TIMEOUT_MS)
+        )?.responseText;
+        await runDoorbellReplyAudio(doorbellReplyAudio, retryResponseText);
         return {
           runId: retry.runId,
           status: retry.wait.status,
@@ -252,8 +307,7 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
           // 不可恢复时为重试仍溢出的原因;供 backend 记录"具体原因"。
           error: retry.wait.error ?? retryOverflow ?? overflowReason,
           recovered,
-          responseText: (await waitTurnMeta(retry.runId, META_POLL_TIMEOUT_MS))
-            ?.responseText,
+          responseText: retryResponseText,
         };
       } catch (err) {
         // deleteSession 被拒(如主会话保护)或重试失败 → 返回首个结果,不把 webhook 打成 500。
@@ -264,6 +318,7 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
       }
     }
 
+    await runDoorbellReplyAudio(doorbellReplyAudio, firstMeta?.responseText);
     return {
       runId: first.runId,
       status: first.wait.status,

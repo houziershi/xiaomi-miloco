@@ -131,6 +131,7 @@ async def run_agent_turn(
     resolve_target: str | None = None,
     light_context: bool = False,
     idempotency_key: str | None = None,
+    extra_payload: dict[str, Any] | None = None,
 ) -> tuple[str | None, str, float]:
     """投递一条消息并**同步等待**该 turn 结束(或超时),返回 ``(run_id, status, rtt_ms)``。
 
@@ -164,6 +165,7 @@ async def run_agent_turn(
         resolve_target=resolve_target,
         light_context=light_context,
         idempotency_key=idempotency_key,
+        extra_payload=extra_payload,
     )
     return run_id, status, rtt_ms
 
@@ -179,6 +181,7 @@ async def run_agent_turn_detailed(
     resolve_target: str | None = None,
     light_context: bool = False,
     idempotency_key: str | None = None,
+    extra_payload: dict[str, Any] | None = None,
 ) -> tuple[str | None, str, float, str | None]:
     """Like :func:`run_agent_turn`, also returns OpenClaw assistant text if provided."""
     started_at = time.monotonic()
@@ -198,6 +201,8 @@ async def run_agent_turn_detailed(
         payload["resolveTarget"] = resolve_target
     if light_context:
         payload["lightContext"] = True
+    if extra_payload:
+        payload.update(extra_payload)
     data = await call_agent_webhook(
         "agent",
         payload,

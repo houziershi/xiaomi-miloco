@@ -985,6 +985,8 @@ class MiotProxy:
                 extra_payload = {
                     "doorbellReplyAudio": {
                         "did": msg.did,
+                        "siid": msg.siid,
+                        "eiid": msg.eiid,
                         "wakeActionIid": settings.doorbell_wake_action_iid,
                         "audioCommand": settings.doorbell_reply_audio_command,
                     }

@@ -259,7 +259,7 @@ class MiotSettings(BaseModel):
     )
     doorbell_wake_action_iid: str | None = Field(
         default="action.17.3",
-        description="收到 OpenClaw 回复后用于唤醒门锁的 action iid；为空则不唤醒。",
+        description="OpenClaw 播放门锁回复音频前用于唤醒门锁的 action iid；为空时 OpenClaw 侧回退默认 action.17.3。",
     )
     doorbell_reply_audio_command: list[str] | None = Field(
         default=None,

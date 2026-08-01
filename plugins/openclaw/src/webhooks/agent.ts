@@ -19,6 +19,8 @@ const META_POLL_INTERVAL_MS = 100;
 
 interface DoorbellReplyAudioRequest {
   did: string;
+  siid?: number;
+  eiid?: number;
   wakeActionIid?: string;
   audioCommand?: string[];
 }
@@ -81,7 +83,7 @@ function isContextOverflow(text: string | null | undefined): boolean {
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 function formatCommandPart(part: string, values: Record<string, string>): string {
-  return part.replaceAll(/\{(text|did|wakeActionIid)\}/g, (_match, key) =>
+  return part.replaceAll(/\{(text|did|siid|eiid|wakeActionIid)\}/g, (_match, key) =>
     values[key] ?? "",
   );
 }
@@ -109,7 +111,13 @@ async function runDoorbellReplyAudio(
     return;
   }
 
-  const values = { text, did: request.did, wakeActionIid };
+  const values = {
+    text,
+    did: request.did,
+    siid: request.siid == null ? "" : String(request.siid),
+    eiid: request.eiid == null ? "" : String(request.eiid),
+    wakeActionIid,
+  };
   const [command, ...args] = audioCommand.map((part) =>
     formatCommandPart(part, values),
   );

@@ -95,6 +95,8 @@ async def test_doorbell_event_requests_openclaw_reply_audio(monkeypatch):
     assert run_turn.await_args.kwargs["extra_payload"] == {
         "doorbellReplyAudio": {
             "did": "door-did",
+            "siid": 7,
+            "eiid": 1006,
             "wakeActionIid": "action.17.3",
             "audioCommand": ["/bin/echo", "{did}", "{text}"],
         }

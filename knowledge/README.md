@@ -162,6 +162,7 @@ knowledge/
   - [OpenClaw SDK](05-external-deps/sdk-openclaw.md)
 - **06-dev-guide**
   - [开发指南](06-dev-guide/dev-guide.md)
+  - [门锁门铃回复音频部署指南](06-dev-guide/doorlock-doorbell-audio.md)
   - [故障排查](06-dev-guide/troubleshooting.md)
 - **07-design**
   - [设计规范（总览）](07-design/README.md)

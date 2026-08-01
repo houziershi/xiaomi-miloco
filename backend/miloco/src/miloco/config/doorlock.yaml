@@ -11,6 +11,7 @@
 # MIoT 事件 topic 形如：
 #   device/{did}/up/event_occured/{siid}/{eiid}
 # 注意：MIoT broker/topic 使用历史拼写 event_occured，不是 event_occurred。
+# 完整部署流程见：knowledge/06-dev-guide/doorlock-doorbell-audio.md
 
 miot:
   # doorbell_did
@@ -45,7 +46,7 @@ miot:
   #   格式固定为 action.{siid}.{aiid}，会通过 MIoT action 调用执行，参数为空列表 []。
   #   当前已验证唤醒命令等价于：
   #     miloco-cli device action <did> action.17.3
-  #   为空（null 或 ""）时跳过唤醒，仅执行后续音频命令（如果配置了）。
+  #   为空（null 或 ""）时 OpenClaw 侧回退默认 action.17.3。当前链路要求播放音频前先唤醒。
   doorbell_wake_action_iid: action.17.3
 
   # doorbell_reply_audio_command

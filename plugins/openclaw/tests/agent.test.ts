@@ -113,8 +113,15 @@ describe("kAgentWebhook 上下文溢出自愈", () => {
         timeoutMs: 1000,
         doorbellReplyAudio: {
           did: "1179479632",
+          siid: 7,
+          eiid: 1006,
           wakeActionIid: "action.17.3",
-          audioCommand: ["/tmp/play-doorlock-audio", "{text}", "{did}"],
+          audioCommand: [
+            "/tmp/play-doorlock-audio",
+            "{text}",
+            "{did}",
+            "{siid}.{eiid}",
+          ],
         },
       },
     } as never)) as { responseText?: string };
@@ -130,6 +137,7 @@ describe("kAgentWebhook 上下文溢出自愈", () => {
     expect(runShellMock).toHaveBeenNthCalledWith(2, "/tmp/play-doorlock-audio", [
       "请稍等，我马上来。",
       "1179479632",
+      "7.1006",
     ]);
   });
 

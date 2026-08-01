@@ -95,23 +95,42 @@ function formatCommandPart(part: string, values: Record<string, string>): string
   );
 }
 
+function elapsedMs(startedAt: number): number {
+  return Date.now() - startedAt;
+}
+
+function summarizeCommand(command: string, args: string[]): string[] {
+  return [command, ...args].map((part) =>
+    part.length > 80 ? `${part.slice(0, 77)}...` : part,
+  );
+}
+
 async function runDoorbellReplyAudio(
   api: Parameters<WebhookEntry["action"]>[0]["api"],
   request: DoorbellReplyAudioRequest | undefined,
   responseText: string | null | undefined,
 ) {
+  const totalStartedAt = Date.now();
   const text = responseText?.trim();
   if (!request || !request.did || !text) return false;
   const wakeActionIid = request.wakeActionIid?.trim() || "action.17.3";
   const audioCommand = request.audioCommand?.filter((part) => part.trim());
   if (!audioCommand?.length) return false;
 
+  logger.info(
+    `[doorbell-reply-audio] start conversation=${request.conversationId ?? ""} did=${request.did} textChars=${text.length} wakeAction=${wakeActionIid}`,
+  );
+
+  const wakeStartedAt = Date.now();
   const wake = await runShell("miloco-cli", [
     "device",
     "action",
     request.did,
     wakeActionIid,
   ]);
+  logger.info(
+    `[doorbell-reply-audio] wake finished conversation=${request.conversationId ?? ""} did=${request.did} iid=${wakeActionIid} status=${wake.status} durationMs=${elapsedMs(wakeStartedAt)}`,
+  );
   if (wake.status !== 0 || wake.error) {
     const error = `wake failed: ${wake.error?.message ?? wake.stderr}`;
     logger.error(
@@ -131,7 +150,14 @@ async function runDoorbellReplyAudio(
   const [command, ...args] = audioCommand.map((part) =>
     formatCommandPart(part, values),
   );
+  logger.info(
+    `[doorbell-reply-audio] audio command starting conversation=${request.conversationId ?? ""} did=${request.did} command=${JSON.stringify(summarizeCommand(command, args))}`,
+  );
+  const audioStartedAt = Date.now();
   const audio = await runShell(command, args);
+  logger.info(
+    `[doorbell-reply-audio] audio command finished conversation=${request.conversationId ?? ""} did=${request.did} status=${audio.status} durationMs=${elapsedMs(audioStartedAt)}`,
+  );
   if (audio.status !== 0 || audio.error) {
     const error = `audio command failed: ${audio.error?.message ?? audio.stderr}`;
     logger.error(
@@ -140,7 +166,11 @@ async function runDoorbellReplyAudio(
     await reportDoorbellReplyAudioResult(api, request, false, error);
     return false;
   }
+  const callbackStartedAt = Date.now();
   await reportDoorbellReplyAudioResult(api, request, true);
+  logger.info(
+    `[doorbell-reply-audio] done conversation=${request.conversationId ?? ""} did=${request.did} totalMs=${elapsedMs(totalStartedAt)} callbackMs=${elapsedMs(callbackStartedAt)}`,
+  );
   return true;
 }
 

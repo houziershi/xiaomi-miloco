@@ -53,13 +53,54 @@ from miloco.miot.mips_listeners import (
 )
 from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
 from miloco.miot.welcome_service import DeviceWelcomeService
-from miloco.utils.agent_client import run_agent_turn
+from miloco.utils.agent_client import run_agent_turn_detailed
 
 logger = logging.getLogger(__name__)
 
 
 def _join_device_event_text(items: list[object]) -> str:
     return "\n".join(str(item) for item in items if str(item).strip())
+
+
+def _parse_action_iid(iid: str) -> tuple[int, int]:
+    parts = iid.split(".")
+    if len(parts) != 3 or parts[0] != "action":
+        raise ValueError(f"invalid action iid: {iid}")
+    return int(parts[1]), int(parts[2])
+
+
+def _format_audio_command(command: list[str], values: dict[str, object]) -> list[str]:
+    return [part.format(**values) for part in command]
+
+
+async def _run_reply_audio_command(settings, reply_text: str) -> int:
+    command = settings.doorbell_reply_audio_command
+    if not command or not reply_text.strip():
+        return 0
+    values = {
+        "text": reply_text.strip(),
+        "did": settings.doorbell_did or "",
+        "siid": settings.doorbell_siid,
+        "eiid": settings.doorbell_eiid,
+    }
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_format_audio_command(command, values),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except Exception as e:
+        logger.error("doorbell reply audio command failed to start: %s", e)
+        return -1
+    if proc.returncode != 0:
+        logger.error(
+            "doorbell reply audio command failed code=%s stdout=%s stderr=%s",
+            proc.returncode,
+            stdout.decode(errors="ignore")[:500],
+            stderr.decode(errors="ignore")[:500],
+        )
+    return int(proc.returncode or 0)
 
 
 def _resolve_camera_switch_iids(spec: dict) -> list[tuple[int, int]]:
@@ -980,15 +1021,45 @@ class MiotProxy:
         )
         if settings.doorbell_session_key:
             trace_id = str(uuid.uuid4())
-            await run_agent_turn(
+            run_id, status, _rtt_ms, reply_text = await run_agent_turn_detailed(
                 text,
                 session_key=settings.doorbell_session_key,
                 lane="miloco-interactive",
                 trace_id=trace_id,
                 wait_timeout_ms=get_settings().dispatcher.turn_wait_timeout_ms,
             )
+            if status == "ok" and reply_text:
+                await self._wake_doorbell_lock(settings)
+                await _run_reply_audio_command(settings, reply_text)
+            else:
+                logger.info(
+                    "skip doorbell reply playback run_id=%s status=%s has_reply=%s",
+                    run_id,
+                    status,
+                    bool(reply_text),
+                )
             return
         await dispatch_event("device_event", [text], _join_device_event_text)
+
+    async def _wake_doorbell_lock(self, settings) -> None:
+        """Wake the configured door lock before sending reply audio."""
+        action_iid = (settings.doorbell_wake_action_iid or "").strip()
+        did = (settings.doorbell_did or "").strip()
+        if not did or not action_iid:
+            return
+        try:
+            siid, aiid = _parse_action_iid(action_iid)
+            await self.call_device_action(
+                MIoTActionParam(did=did, siid=siid, aiid=aiid, in_=[])
+            )
+            logger.info("doorbell lock wake action sent did=%s iid=%s", did, action_iid)
+        except Exception as e:
+            logger.error(
+                "doorbell lock wake action failed did=%s iid=%s: %s",
+                did,
+                action_iid,
+                e,
+            )
 
     def _is_move_into_scope(self, msg: MIoTDeviceBindEvent) -> bool:
         """True if an hr_change moved a device into a managed home from an

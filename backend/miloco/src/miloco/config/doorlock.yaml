@@ -36,4 +36,28 @@ miot:
   #   对应 sessionKey：
   #     agent:main:dashboard:xxxx
   #   为空时使用 Miloco 默认 owner-channel 路由（由 OpenClaw 解析最近/已绑定通知会话）。
+  #   注意：门锁“播放 OpenClaw 回复文本”依赖固定 session 的同步返回；如果这里为空，
+  #   仍会投递事件，但不会执行门锁唤醒和回复音频播放。
   doorbell_session_key: null
+
+  # doorbell_wake_action_iid
+  #   OpenClaw 回复完成后、发送门锁音频前调用的门锁唤醒 action。
+  #   格式固定为 action.{siid}.{aiid}，会通过 MIoT action 调用执行，参数为空列表 []。
+  #   当前已验证唤醒命令等价于：
+  #     miloco-cli device action <did> action.17.3
+  #   为空（null 或 ""）时跳过唤醒，仅执行后续音频命令（如果配置了）。
+  doorbell_wake_action_iid: action.17.3
+
+  # doorbell_reply_audio_command
+  #   播放 OpenClaw 回复文本的外部命令参数列表。Miloco 不启 shell，按数组直接执行。
+  #   为空（null）时不播放音频；适合先只验证“收到事件并生成回复”。
+  #   支持占位符：
+  #     {text}  OpenClaw 回复文本
+  #     {did}   门锁 did
+  #     {siid}  门铃事件 siid
+  #     {eiid}  门铃事件 eiid
+  #   示例（按你的本机脚本实际参数调整）：
+  #     ["/path/to/send-doorlock-audio", "--did", "{did}", "--text", "{text}"]
+  #   如果脚本需要先把文本转 PCM，再用 audio_sender 发到门锁，可把这些步骤封装到一个脚本里，
+  #   然后在这里配置该脚本路径和 {text} 参数。
+  doorbell_reply_audio_command: null

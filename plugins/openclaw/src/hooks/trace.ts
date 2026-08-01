@@ -68,6 +68,7 @@ type AgentMetaPayload = {
   slowestToolName: string | null;
   errorCount: number;
   errorMsg: string | null;
+  responseText: string | null;
 };
 
 type TurnState = {
@@ -233,7 +234,19 @@ type ReducedMeta = {
   slowestToolName: string | null;
   errorCount: number;
   errorMsg: string | null;
+  responseText: string | null;
 };
+
+function normalizeAssistantTexts(value: unknown): string | null {
+  if (!Array.isArray(value)) return null;
+  const text = value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  return text || null;
+}
 
 function reduceMeta(buffer: RecordedEvent[]): ReducedMeta {
   let llmCallCount = 0;
@@ -244,10 +257,12 @@ function reduceMeta(buffer: RecordedEvent[]): ReducedMeta {
   let slowestToolName: string | null = null;
   let errorCount = 0;
   let errorMsg: string | null = null;
+  let responseText: string | null = null;
 
   for (const ev of buffer) {
     if (ev.hook === "llm_output") {
       llmCallCount++;
+      responseText = normalizeAssistantTexts(ev.payload?.assistantTexts) ?? responseText;
     }
     if (ev.hook === "model_call_ended") {
       const d = ev.payload?.durationMs;
@@ -278,6 +293,7 @@ function reduceMeta(buffer: RecordedEvent[]): ReducedMeta {
     slowestToolName,
     errorCount,
     errorMsg,
+    responseText,
   };
 }
 

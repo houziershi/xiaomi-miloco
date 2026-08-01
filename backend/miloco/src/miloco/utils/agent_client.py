@@ -154,6 +154,33 @@ async def run_agent_turn(
     否则 HTTP 先超时而平台 turn 仍在跑。webhook 传输失败(连接/5xx/HTTP 超时)直接
     抛 :class:`AgentWebhookException`,由调用方(drainer)捕获跳过,本函数不兜底。
     """
+    run_id, status, rtt_ms, _response_text = await run_agent_turn_detailed(
+        text,
+        session_key=session_key,
+        lane=lane,
+        trace_id=trace_id,
+        wait_timeout_ms=wait_timeout_ms,
+        deliver=deliver,
+        resolve_target=resolve_target,
+        light_context=light_context,
+        idempotency_key=idempotency_key,
+    )
+    return run_id, status, rtt_ms
+
+
+async def run_agent_turn_detailed(
+    text: str,
+    *,
+    session_key: str,
+    lane: str,
+    trace_id: str,
+    wait_timeout_ms: int,
+    deliver: bool | None = None,
+    resolve_target: str | None = None,
+    light_context: bool = False,
+    idempotency_key: str | None = None,
+) -> tuple[str | None, str, float, str | None]:
+    """Like :func:`run_agent_turn`, also returns OpenClaw assistant text if provided."""
     started_at = time.monotonic()
     payload: dict[str, Any] = {
         "message": text,
@@ -179,9 +206,13 @@ async def run_agent_turn(
     rtt_ms = (time.monotonic() - started_at) * 1000
     run_id: str | None = None
     status = "error"
+    response_text: str | None = None
     if isinstance(data, dict):
         run_id = data.get("runId")
         status = data.get("status", "error")
+        raw_response_text = data.get("responseText")
+        if isinstance(raw_response_text, str) and raw_response_text.strip():
+            response_text = raw_response_text.strip()
         # 上下文溢出自愈观测：溢出 turn 的 give-up 分支返回 isError payload 而非抛错，
         # 平台据此把终态判成 status="ok"、waitForRun 不带 error；故后端识别溢出只能看 webhook
         # 透出的 recovered（true=已删会话重建恢复 / false=系统提示超预算不可恢复），error 则
@@ -208,4 +239,4 @@ async def run_agent_turn(
                 session_key,
                 error,
             )
-    return run_id, status, rtt_ms
+    return run_id, status, rtt_ms, response_text

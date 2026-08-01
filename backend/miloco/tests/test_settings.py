@@ -135,6 +135,8 @@ def test_doorlock_yaml_documents_and_loads_defaults() -> None:
         "doorbell_siid",
         "doorbell_eiid",
         "doorbell_session_key",
+        "doorbell_wake_action_iid",
+        "doorbell_reply_audio_command",
         "event_occured",
     ):
         assert keyword in raw_text
@@ -144,6 +146,8 @@ def test_doorlock_yaml_documents_and_loads_defaults() -> None:
     assert data["miot"]["doorbell_siid"] == 7
     assert data["miot"]["doorbell_eiid"] == 1006
     assert data["miot"]["doorbell_session_key"] is None
+    assert data["miot"]["doorbell_wake_action_iid"] == "action.17.3"
+    assert data["miot"]["doorbell_reply_audio_command"] is None
 
 
 def test_notify_dedup_window_env_override(monkeypatch) -> None:

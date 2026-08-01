@@ -195,12 +195,18 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
     };
 
     const first = await runOnce(idempotencyKey, timeoutMs ?? DEFAULT_WAIT_MS);
+    const firstMeta = await waitTurnMeta(first.runId, META_POLL_TIMEOUT_MS);
 
     // 上下文溢出自愈: plugin 侧无法 reset/clear session,只能 deleteSession 删旧会话重建。
     // 删除后同 sessionKey 再 run 自动建空会话;重试恒一次,不死循环。
     // ⚠️ owner-channel 模式不做自愈：deleteSession 会连用户真实 IM 会话的历史一起删,
     // 代价远大于一次投递失败(backend 按未送达重试),故只记日志、原样返回首个结果。
-    const overflowReason = await detectOverflow(first.runId, first.wait);
+    const overflowReason =
+      first.wait.status === "error" && isContextOverflow(first.wait.error)
+        ? first.wait.error
+        : firstMeta && firstMeta.success === false && isContextOverflow(firstMeta.errorMsg)
+          ? firstMeta.errorMsg ?? undefined
+          : undefined;
     if (overflowReason && resolveTarget === "owner-channel") {
       logger.error(
         `[overflow-self-heal] context overflow on owner channel session=${effectiveSessionKey}; NOT deleting a user's IM session, skip self-heal`,
@@ -246,6 +252,8 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
           // 不可恢复时为重试仍溢出的原因;供 backend 记录"具体原因"。
           error: retry.wait.error ?? retryOverflow ?? overflowReason,
           recovered,
+          responseText: (await waitTurnMeta(retry.runId, META_POLL_TIMEOUT_MS))
+            ?.responseText,
         };
       } catch (err) {
         // deleteSession 被拒(如主会话保护)或重试失败 → 返回首个结果,不把 webhook 打成 500。
@@ -260,6 +268,7 @@ export const kAgentWebhook: WebhookEntry<IRequestBody> = {
       runId: first.runId,
       status: first.wait.status,
       error: first.wait.error,
+      responseText: firstMeta?.responseText,
     };
   },
 };

@@ -257,6 +257,14 @@ class MiotSettings(BaseModel):
         default=None,
         description="门铃事件固定投递的 OpenClaw sessionKey；为空则走默认 owner-channel。",
     )
+    doorbell_wake_action_iid: str | None = Field(
+        default="action.17.3",
+        description="收到 OpenClaw 回复后用于唤醒门锁的 action iid；为空则不唤醒。",
+    )
+    doorbell_reply_audio_command: list[str] | None = Field(
+        default=None,
+        description="播放 OpenClaw 回复文本的外部命令参数列表；为空则不播放。支持 {text}/{did} 等占位符。",
+    )
 
 
 class NotifySettings(BaseModel):

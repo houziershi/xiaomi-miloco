@@ -21,6 +21,11 @@ def _settings(tmp_path, monkeypatch):
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_REPLY_AUDIO_COMMAND", '["/bin/echo", "{text}"]')
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_VISITOR_LISTEN_SECONDS", "15")
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_MAX_TURNS", "3")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SILENCE_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv(
+        "MILOCO_MIOT__DOORBELL_SILENCE_FALLBACK_TEXT",
+        "我没有听到您的声音，请稍后再按门铃。",
+    )
     reset_settings()
     yield
     reset_settings()
@@ -44,7 +49,7 @@ def _speech(
 
 @pytest.mark.asyncio
 async def test_playback_success_opens_listening_window(monkeypatch):
-    service = DoorbellConversationService(clock=lambda: 100.0)
+    service = DoorbellConversationService(clock=lambda: 100.0, schedule_timeouts=False)
     run_turn = AsyncMock(return_value=("run-1", "ok", 100.0, "你是谁？"))
     monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
 
@@ -63,7 +68,7 @@ async def test_playback_success_opens_listening_window(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_playback_failure_ends_and_ignores_speech(monkeypatch):
-    service = DoorbellConversationService(clock=lambda: 100.0)
+    service = DoorbellConversationService(clock=lambda: 100.0, schedule_timeouts=False)
     run_turn = AsyncMock(return_value=("run-1", "ok", 100.0, "你是谁？"))
     monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
     conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
@@ -77,7 +82,7 @@ async def test_playback_failure_ends_and_ignores_speech(monkeypatch):
 @pytest.mark.asyncio
 async def test_matching_complete_speech_forwards_visitor_message(monkeypatch):
     now = 100.0
-    service = DoorbellConversationService(clock=lambda: now)
+    service = DoorbellConversationService(clock=lambda: now, schedule_timeouts=False)
     run_turn = AsyncMock(return_value=("run-1", "ok", 100.0, "请说"))
     monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
     conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
@@ -95,7 +100,7 @@ async def test_matching_complete_speech_forwards_visitor_message(monkeypatch):
 @pytest.mark.asyncio
 async def test_ignores_incomplete_wrong_device_duplicate_and_timeout(monkeypatch):
     now = 100.0
-    service = DoorbellConversationService(clock=lambda: now)
+    service = DoorbellConversationService(clock=lambda: now, schedule_timeouts=False)
     run_turn = AsyncMock(return_value=("run-1", "ok", 100.0, "请说"))
     monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
     conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
@@ -113,7 +118,7 @@ async def test_ignores_incomplete_wrong_device_duplicate_and_timeout(monkeypatch
 
 @pytest.mark.asyncio
 async def test_max_turns_ends_after_configured_visitor_messages(monkeypatch):
-    service = DoorbellConversationService(clock=lambda: 100.0)
+    service = DoorbellConversationService(clock=lambda: 100.0, schedule_timeouts=False)
     run_turn = AsyncMock(return_value=("run-1", "ok", 100.0, "回复"))
     monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
     conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
@@ -125,3 +130,69 @@ async def test_max_turns_ends_after_configured_visitor_messages(monkeypatch):
     service.on_reply_audio_result(conversation_id, success=True)
     assert await service.accept_speech(_speech("第四句")) is False
     assert run_turn.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_silence_timeout_plays_fixed_fallback_and_ends(monkeypatch):
+    now = 100.0
+    service = DoorbellConversationService(clock=lambda: now, schedule_timeouts=False)
+    run_turn = AsyncMock(return_value=("run-1", "ok", 100.0, "请说"))
+    play_audio = AsyncMock(return_value={"played": True})
+    monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
+    monkeypatch.setattr("miloco.doorbell.conversation.call_agent_webhook", play_audio)
+    conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
+    service.on_reply_audio_result(conversation_id, success=True)
+
+    now = 116.0
+    assert await service.expire_listening_windows() == 1
+
+    assert service.is_listening(conversation_id) is False
+    assert run_turn.await_count == 1
+    play_audio.assert_awaited_once()
+    assert play_audio.await_args.args[0] == "doorbell_reply_audio"
+    payload = play_audio.await_args.args[1]
+    assert payload["text"] == "我没有听到您的声音，请稍后再按门铃。"
+    assert payload["doorbellReplyAudio"] == {
+        "did": "door-did",
+        "siid": 7,
+        "eiid": 1006,
+        "wakeActionIid": "action.17.3",
+        "audioCommand": ["/bin/echo", "{text}"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_silence_fallback_skips_when_speech_arrives(monkeypatch):
+    now = 100.0
+    service = DoorbellConversationService(clock=lambda: now, schedule_timeouts=False)
+    run_turn = AsyncMock(return_value=("run-1", "ok", 100.0, "请说"))
+    play_audio = AsyncMock(return_value={"played": True})
+    monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
+    monkeypatch.setattr("miloco.doorbell.conversation.call_agent_webhook", play_audio)
+    conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
+    service.on_reply_audio_result(conversation_id, success=True)
+    assert await service.accept_speech(_speech("我是快递员")) is True
+
+    now = 116.0
+    assert await service.expire_listening_windows() == 0
+
+    play_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_silence_fallback_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SILENCE_FALLBACK_ENABLED", "false")
+    reset_settings()
+    now = 100.0
+    service = DoorbellConversationService(clock=lambda: now, schedule_timeouts=False)
+    run_turn = AsyncMock(return_value=("run-1", "ok", 100.0, "请说"))
+    play_audio = AsyncMock(return_value={"played": True})
+    monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
+    monkeypatch.setattr("miloco.doorbell.conversation.call_agent_webhook", play_audio)
+    conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
+    service.on_reply_audio_result(conversation_id, success=True)
+
+    now = 116.0
+    assert await service.expire_listening_windows() == 1
+
+    play_audio.assert_not_awaited()

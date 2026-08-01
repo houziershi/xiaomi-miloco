@@ -141,6 +141,8 @@ def test_doorlock_yaml_documents_and_loads_defaults() -> None:
         "doorbell_visitor_listen_seconds",
         "doorbell_max_turns",
         "doorbell_visitor_message_prefix",
+        "doorbell_silence_fallback_enabled",
+        "doorbell_silence_fallback_text",
         "event_occured",
     ):
         assert keyword in raw_text
@@ -156,6 +158,8 @@ def test_doorlock_yaml_documents_and_loads_defaults() -> None:
     assert data["miot"]["doorbell_visitor_listen_seconds"] == 15.0
     assert data["miot"]["doorbell_max_turns"] == 3
     assert data["miot"]["doorbell_visitor_message_prefix"] == "门外访客说："
+    assert data["miot"]["doorbell_silence_fallback_enabled"] is True
+    assert data["miot"]["doorbell_silence_fallback_text"] == "我没有听到您的声音，请稍后再按门铃。"
 
 
 def test_notify_dedup_window_env_override(monkeypatch) -> None:

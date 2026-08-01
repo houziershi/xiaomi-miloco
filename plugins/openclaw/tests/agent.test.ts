@@ -48,7 +48,7 @@ vi.mock("../src/miloco/config.js", () => ({
   loadSharedConfig: (api: unknown) => loadSharedConfigMock(api),
 }));
 
-import { kAgentWebhook } from "../src/webhooks/agent.js";
+import { kAgentWebhook, kDoorbellReplyAudioWebhook } from "../src/webhooks/agent.js";
 
 const OVERFLOW = "Context overflow: prompt too large for the model (precheck).";
 const SESSION = "agent:main:miloco-rule";
@@ -108,6 +108,37 @@ afterEach(() => {
 });
 
 describe("kAgentWebhook 上下文溢出自愈", () => {
+  it("doorbell_reply_audio：不跑 agent，直接唤醒并播放固定文本", async () => {
+    const { api, run } = makeApi({});
+
+    const res = (await kDoorbellReplyAudioWebhook.action({
+      api,
+      payload: {
+        text: "我没有听到您的声音，请稍后再按门铃。",
+        doorbellReplyAudio: {
+          did: "1179479632",
+          wakeActionIid: "action.17.3",
+          audioCommand: ["/tmp/play-doorlock-audio", "{text}", "{did}"],
+        },
+      },
+    } as never)) as { played?: boolean };
+
+    expect(res.played).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+    expect(runShellMock).toHaveBeenCalledTimes(2);
+    expect(runShellMock).toHaveBeenNthCalledWith(1, "miloco-cli", [
+      "device",
+      "action",
+      "1179479632",
+      "action.17.3",
+    ]);
+    expect(runShellMock).toHaveBeenNthCalledWith(2, "/tmp/play-doorlock-audio", [
+      "我没有听到您的声音，请稍后再按门铃。",
+      "1179479632",
+    ]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("doorbellReplyAudio：OpenClaw 回复后先唤醒门锁，再播放回复音频", async () => {
     peekTurnMetaMock.mockImplementation(() => ({
       success: true,

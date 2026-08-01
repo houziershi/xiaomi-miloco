@@ -50,6 +50,11 @@ interface IRequestBody {
   doorbellReplyAudio?: DoorbellReplyAudioRequest;
 }
 
+interface IDoorbellReplyAudioBody {
+  text: string;
+  doorbellReplyAudio?: DoorbellReplyAudioRequest;
+}
+
 interface WaitResult {
   status: "ok" | "error" | "timeout";
   error?: string;
@@ -96,10 +101,10 @@ async function runDoorbellReplyAudio(
   responseText: string | null | undefined,
 ) {
   const text = responseText?.trim();
-  if (!request || !request.did || !text) return;
+  if (!request || !request.did || !text) return false;
   const wakeActionIid = request.wakeActionIid?.trim() || "action.17.3";
   const audioCommand = request.audioCommand?.filter((part) => part.trim());
-  if (!audioCommand?.length) return;
+  if (!audioCommand?.length) return false;
 
   const wake = await runShell("miloco-cli", [
     "device",
@@ -113,7 +118,7 @@ async function runDoorbellReplyAudio(
       `[doorbell-reply-audio] wake failed did=${request.did} iid=${wakeActionIid} status=${wake.status} error=${wake.error?.message ?? wake.stderr}`,
     );
     await reportDoorbellReplyAudioResult(api, request, false, error);
-    return;
+    return false;
   }
 
   const values = {
@@ -133,9 +138,10 @@ async function runDoorbellReplyAudio(
       `[doorbell-reply-audio] audio command failed did=${request.did} status=${audio.status} error=${audio.error?.message ?? audio.stderr}`,
     );
     await reportDoorbellReplyAudioResult(api, request, false, error);
-    return;
+    return false;
   }
   await reportDoorbellReplyAudioResult(api, request, true);
+  return true;
 }
 
 async function reportDoorbellReplyAudioResult(
@@ -177,6 +183,18 @@ async function reportDoorbellReplyAudioResult(
     logger.error(`[doorbell-reply-audio] callback failed error=${message}`);
   }
 }
+
+export const kDoorbellReplyAudioWebhook: WebhookEntry<IDoorbellReplyAudioBody> = {
+  name: "doorbell_reply_audio",
+  action: async ({ api, payload }) => {
+    const played = await runDoorbellReplyAudio(
+      api,
+      payload.doorbellReplyAudio,
+      payload.text,
+    );
+    return { played };
+  },
+};
 
 // 等本 run 的 trace meta 落定(done)后返回;超时仍未 done 返 undefined(按非溢出处理,安全降级)。
 async function waitTurnMeta(runId: string, timeoutMs: number) {

@@ -175,6 +175,8 @@ Miloco 会把这些值传给 OpenClaw 插件；OpenClaw 插件会先执行唤醒
 - `doorbell_visitor_listen_seconds`：每次门锁回复音频播放成功后，等待访客说话的窗口，默认 `15.0` 秒。
 - `doorbell_max_turns`：单次门铃会话最多接收并转发的访客语音轮数，默认 `3`。
 - `doorbell_visitor_message_prefix`：访客转写发给 OpenClaw 时的前缀，默认 `门外访客说：`。
+- `doorbell_silence_fallback_enabled`：访客监听窗口内无人说话时，是否直接播放固定兜底语音并结束会话，默认 `true`。
+- `doorbell_silence_fallback_text`：静默超时后播放到门锁的固定文案，默认 `我没有听到您的声音，请稍后再按门铃。`。
 
 示例完整配置：
 
@@ -193,7 +195,9 @@ Miloco 会把这些值传给 OpenClaw 插件；OpenClaw 插件会先执行唤醒
     "doorbell_conversation_enabled": true,
     "doorbell_visitor_listen_seconds": 15.0,
     "doorbell_max_turns": 3,
-    "doorbell_visitor_message_prefix": "门外访客说："
+    "doorbell_visitor_message_prefix": "门外访客说：",
+    "doorbell_silence_fallback_enabled": true,
+    "doorbell_silence_fallback_text": "我没有听到您的声音，请稍后再按门铃。"
   }
 }
 ```
@@ -205,6 +209,7 @@ Miloco 会把这些值传给 OpenClaw 插件；OpenClaw 插件会先执行唤醒
 - 如果唤醒门锁或播放音频失败，OpenClaw 会回调失败，Miloco 结束本次门铃会话，不再监听访客语音。
 - 访客语音必须满足 `is_complete=true` 且来源 did 匹配门锁 did，才会转发为 `门外访客说：...`。
 - 每次访客语音进入同一 OpenClaw 会话后，OpenClaw 的新回复会再次唤醒门锁并播放。
+- 如果监听窗口内没有访客语音，Miloco 不再调用 OpenClaw 生成回复，而是直接请求 OpenClaw 插件播放 `doorbell_silence_fallback_text`，播放后结束会话。
 
 ## 7. 安装/重启服务
 
@@ -271,6 +276,7 @@ miloco-cli scope camera list | rg '<did>|voice_in_use'
 - 没收到门铃事件：重新按日志确认 `doorbell_did`、`doorbell_siid`、`doorbell_eiid`。
 - 有回复但无声音：确认 OpenClaw 日志里唤醒 action 和音频命令没有失败，确认门锁 IP/端口可达。
 - 有第一次播放但访客说话没进会话：确认播放成功回调日志、门锁拾音开关、`doorbell_visitor_listen_seconds` 窗口，以及语音识别结果是否 `is_complete=true`。
+- 访客不说话没有兜底音：确认 `doorbell_silence_fallback_enabled=true`，以及 OpenClaw 日志中 `doorbell_reply_audio` action 没有播放失败。
 
 ## 9. 代码入口
 

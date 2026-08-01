@@ -281,6 +281,14 @@ class MiotSettings(BaseModel):
         default="门外访客说：",
         description="转发访客语音到 OpenClaw 会话时附加在转写文本前的前缀。",
     )
+    doorbell_silence_fallback_enabled: bool = Field(
+        default=True,
+        description="访客监听窗口内无人说话时，是否直接播放固定兜底语音并结束本次门铃会话。",
+    )
+    doorbell_silence_fallback_text: str = Field(
+        default="我没有听到您的声音，请稍后再按门铃。",
+        description="访客静默超时后直接播放到门锁的固定兜底文案，不再调用 OpenClaw 生成回复。",
+    )
 
 
 class NotifySettings(BaseModel):

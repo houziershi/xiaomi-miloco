@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -12,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
 from miloco.config import get_settings
-from miloco.utils.agent_client import run_agent_turn_detailed
+from miloco.utils.agent_client import call_agent_webhook, run_agent_turn_detailed
 
 if TYPE_CHECKING:
     from miloco.perception.types import Speech
@@ -35,14 +36,21 @@ class _Conversation:
     visitor_turns: int = 0
     state: str = "waiting_playback"
     listen_deadline: float = 0.0
+    listen_generation: int = 0
     seen_speeches: set[str] = field(default_factory=set)
 
 
 class DoorbellConversationService:
     """Coordinates OpenClaw replies, door-lock playback, and visitor speech turns."""
 
-    def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] | None = None,
+        schedule_timeouts: bool = True,
+    ) -> None:
         self._clock = clock or time.monotonic
+        self._schedule_timeouts = schedule_timeouts
         self._active: dict[str, _Conversation] = {}
 
     async def start(self, *, did: str, siid: int, eiid: int, text: str) -> str | None:
@@ -100,6 +108,7 @@ class DoorbellConversationService:
             )
             return True
         conversation.state = "listening"
+        conversation.listen_generation += 1
         conversation.listen_deadline = (
             self._clock() + get_settings().miot.doorbell_visitor_listen_seconds
         )
@@ -109,7 +118,18 @@ class DoorbellConversationService:
             conversation.did,
             conversation.listen_deadline,
         )
+        self._schedule_listen_timeout(conversation)
         return True
+
+    async def expire_listening_windows(self) -> int:
+        expired = 0
+        now = self._clock()
+        for conversation in list(self._active.values()):
+            if conversation.state != "listening" or now <= conversation.listen_deadline:
+                continue
+            expired += 1
+            await self._end_after_silence(conversation)
+        return expired
 
     async def accept_speech(self, speech: Speech) -> bool:
         conversation = self._find_listening_conversation(speech)
@@ -123,6 +143,7 @@ class DoorbellConversationService:
         conversation.seen_speeches.add(content)
         conversation.visitor_turns += 1
         conversation.state = "waiting_playback"
+        conversation.listen_generation += 1
         visitor_text = f"{get_settings().miot.doorbell_visitor_message_prefix}{content}"
         await self._run_turn(conversation, visitor_text)
         if conversation.visitor_turns >= get_settings().miot.doorbell_max_turns:
@@ -148,6 +169,66 @@ class DoorbellConversationService:
                 return conversation
         return None
 
+    def _schedule_listen_timeout(self, conversation: _Conversation) -> None:
+        if not self._schedule_timeouts:
+            return
+        generation = conversation.listen_generation
+        delay = max(0.0, conversation.listen_deadline - self._clock())
+
+        async def _timeout() -> None:
+            await asyncio.sleep(delay)
+            current = self._active.get(conversation.conversation_id)
+            if (
+                current is None
+                or current.state != "listening"
+                or current.listen_generation != generation
+                or self._clock() < current.listen_deadline
+            ):
+                return
+            await self._end_after_silence(current)
+
+        try:
+            asyncio.create_task(_timeout())
+        except RuntimeError:
+            logger.debug(
+                "doorbell silence timeout not scheduled outside running loop id=%s",
+                conversation.conversation_id,
+            )
+
+    async def _end_after_silence(self, conversation: _Conversation) -> None:
+        self._active.pop(conversation.conversation_id, None)
+        conversation.state = "ended"
+        conversation.listen_generation += 1
+        logger.info(
+            "doorbell conversation silence timeout id=%s did=%s",
+            conversation.conversation_id,
+            conversation.did,
+        )
+        miot = get_settings().miot
+        if not miot.doorbell_silence_fallback_enabled:
+            return
+        text = miot.doorbell_silence_fallback_text.strip()
+        if not text or not miot.doorbell_reply_audio_command:
+            return
+        try:
+            await call_agent_webhook(
+                "doorbell_reply_audio",
+                {
+                    "text": text,
+                    "doorbellReplyAudio": self._audio_payload(
+                        conversation, include_conversation_id=False
+                    ),
+                },
+                timeout=30.0,
+            )
+        except Exception as e:
+            logger.warning(
+                "doorbell silence fallback audio failed id=%s did=%s error=%s",
+                conversation.conversation_id,
+                conversation.did,
+                e,
+            )
+
     async def _run_turn(self, conversation: _Conversation, text: str) -> None:
         settings = get_settings()
         trace_id = str(uuid.uuid4())
@@ -164,16 +245,20 @@ class DoorbellConversationService:
         )
 
     @staticmethod
-    def _audio_payload(conversation: _Conversation) -> dict[str, object]:
+    def _audio_payload(
+        conversation: _Conversation, *, include_conversation_id: bool = True
+    ) -> dict[str, object]:
         miot = get_settings().miot
-        return {
-            "conversationId": conversation.conversation_id,
+        payload: dict[str, object] = {
             "did": conversation.did,
             "siid": conversation.siid,
             "eiid": conversation.eiid,
             "wakeActionIid": miot.doorbell_wake_action_iid,
             "audioCommand": miot.doorbell_reply_audio_command,
         }
+        if include_conversation_id:
+            payload["conversationId"] = conversation.conversation_id
+        return payload
 
 
 _service = DoorbellConversationService()

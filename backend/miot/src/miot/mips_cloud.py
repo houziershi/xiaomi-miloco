@@ -533,11 +533,13 @@ class MIoTMipsCloud:
         device-scoped `event_occured/#` topic. Callers should filter the decoded
         `(siid, eiid)` they care about.
         """
+        topic = f"device/{did}/up/event_occured/#"
         await self._subscribe_async(
-            f"device/{did}/up/event_occured/#",
+            topic,
             handler,
             self._make_device_event_decoder(),
         )
+        _LOGGER.info("mips_cloud subscribed device events topic=%s", topic)
 
     async def unsub_device_events_async(self, did: str) -> None:
         await self._unsubscribe_async(f"device/{did}/up/event_occured/#")

@@ -1549,23 +1549,19 @@ class MiotProxy:
             if subscribed:
                 new_lock_devices[did]["subscribed"] = subscribed
             else:
-                logger.warning("No subscribable events found for lock %s", did)
-
-            # Debug: subscribe to all events via wildcard for diagnostics
-            try:
-                mips = self._miot_client._mips_cloud
-                if mips and mips.is_connected:
-                    await mips.sub_device_event_debug_async(did, self._on_debug_device_event)
-                    logger.info("Debug wildcard event subscription added for lock %s", did)
-            except Exception as e:
-                logger.debug("Debug wildcard subscription failed for lock %s: %s", did, e)
+                logger.info(
+                    "No exact lock event leaves subscribed for %s; "
+                    "doorbell events use device wildcard subscription and siid/eiid filtering",
+                    did,
+                )
 
         self._lock_devices = new_lock_devices
         n_subscribed = sum(
             len(v.get("subscribed", [])) for v in new_lock_devices.values()
         )
         logger.info(
-            "Lock device subscriptions synced: %d lock devices, %d events subscribed",
+            "Lock device discovery synced: %d lock devices, %d exact event leaves subscribed "
+            "(doorbell wildcard subscriptions are synced separately)",
             len(new_lock_devices),
             n_subscribed,
         )

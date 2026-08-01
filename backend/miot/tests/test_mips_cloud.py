@@ -28,6 +28,7 @@ import pytest
 from miot.mips_cloud import MIoTMipsCloud
 from miot.types import (
     MIoTDeviceBindEvent,
+    MIoTDeviceEvent,
     MIoTDeviceStateEvent,
     MIoTSceneChangedEvent,
     MipsSubscribeRejectedError,
@@ -866,5 +867,77 @@ async def test_device_state_reconnect_resubscribes_both_topics():
         for _, _, mid in fake.subscribed[before:]:
             fake.fire_suback(mid, [2])
         await asyncio.sleep(0.01)
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_device_event_subscribes_exact_topic_and_dispatches():
+    """device/{did}/up/event_occured/{siid}/{eiid} is decoded and dispatched."""
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+    received: list[MIoTDeviceEvent] = []
+
+    try:
+        await asyncio.gather(
+            mips.sub_device_event_async("dev-door", 7, 1006, handler=received.append),
+            _ack_subscribes(fake, 1),
+        )
+        assert fake.subscribed[-1][0] == "device/dev-door/up/event_occured/7/1006"
+
+        fake.fire_message(
+            "device/dev-door/up/event_occured/7/1006",
+            b'{"method":"event_occured","params":{"did":"dev-door",'
+            b'"arguments":[{"piid":1,"value":1785559087}]}}',
+        )
+        await asyncio.sleep(0.05)
+
+        assert len(received) == 1
+        assert received[0].did == "dev-door"
+        assert received[0].siid == 7
+        assert received[0].eiid == 1006
+        assert received[0].raw["params"]["arguments"][0]["value"] == 1785559087
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_device_events_wildcard_subscribes_and_dispatches_decoded_event():
+    """device/{did}/up/event_occured/# dispatches decoded event leaves."""
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+    received: list[MIoTDeviceEvent] = []
+
+    try:
+        await asyncio.gather(
+            mips.sub_device_events_async("dev-door", handler=received.append),
+            _ack_subscribes(fake, 1),
+        )
+        assert fake.subscribed[-1][0] == "device/dev-door/up/event_occured/#"
+
+        fake.fire_message(
+            "device/dev-door/up/event_occured/7/1006",
+            b'{"method":"event_occured","params":{"did":"dev-door"}}',
+        )
+        await asyncio.sleep(0.05)
+
+        assert len(received) == 1
+        assert received[0].did == "dev-door"
+        assert received[0].siid == 7
+        assert received[0].eiid == 1006
     finally:
         await mips.deinit_async()

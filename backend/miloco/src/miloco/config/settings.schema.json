@@ -116,6 +116,38 @@
         }
       }
     },
+    "miot": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "MIoT 云接入参数",
+      "properties": {
+        "cloud_server": {
+          "type": "string",
+          "default": "cn",
+          "description": "MIoT 云区域（cn/de/i2/ru/sg/us）"
+        },
+        "doorbell_did": {
+          "anyOf": [{ "type": "string" }, { "type": "null" }],
+          "default": null,
+          "description": "门铃事件设备 did；为空则不订阅门铃事件"
+        },
+        "doorbell_siid": {
+          "type": "integer",
+          "default": 7,
+          "description": "门铃事件服务 siid"
+        },
+        "doorbell_eiid": {
+          "type": "integer",
+          "default": 1006,
+          "description": "门铃事件 eiid"
+        },
+        "doorbell_session_key": {
+          "anyOf": [{ "type": "string" }, { "type": "null" }],
+          "default": null,
+          "description": "门铃事件固定投递的 OpenClaw sessionKey；为空则走默认 owner-channel"
+        }
+      }
+    },
     "notify": {
       "type": "object",
       "additionalProperties": true,

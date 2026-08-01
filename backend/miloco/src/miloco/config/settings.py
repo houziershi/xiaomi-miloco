@@ -4,7 +4,8 @@
 """miloco 后端统一配置入口。
 
 - 优先级：环境变量（``MILOCO_*``）> ``$MILOCO_HOME/config.json``（用户可编辑）
-  > ``config/settings.yaml``（后端默认）> 代码默认值
+  > ``config/doorlock.yaml``（门锁专用默认）> ``config/settings.yaml``（后端默认）
+  > 代码默认值
 - 单例访问：``get_settings() -> MilocoSettings``
 - 派生路径：``DirectorySettings`` 的 ``image_dir`` / ``log_dir`` /
   ``miot_cache_dir`` / ``static_dir`` 均由 ``$MILOCO_HOME`` 与 ``storage`` 计算。
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 _CONFIG_DIR = Path(__file__).parent
 _BACKEND_ROOT = _CONFIG_DIR.parent  # miloco/src/miloco
 _SETTINGS_YAML = _CONFIG_DIR / "settings.yaml"
+_DOORLOCK_YAML = _CONFIG_DIR / "doorlock.yaml"
 _SETTINGS_SCHEMA = _CONFIG_DIR / "settings.schema.json"
 
 
@@ -238,6 +240,22 @@ class MiotSettings(BaseModel):
 
     cloud_server: str = Field(
         default="cn", description="MIoT 云区域（cn/de/i2/ru/sg/us）"
+    )
+    doorbell_did: str | None = Field(
+        default=None,
+        description="门铃事件设备 did；为空则不订阅门铃事件。",
+    )
+    doorbell_siid: int = Field(
+        default=7,
+        description="门铃事件服务 siid（对应 device/{did}/up/event_occured/{siid}/{eiid}）。",
+    )
+    doorbell_eiid: int = Field(
+        default=1006,
+        description="门铃事件 eiid（对应 device/{did}/up/event_occured/{siid}/{eiid}）。",
+    )
+    doorbell_session_key: str | None = Field(
+        default=None,
+        description="门铃事件固定投递的 OpenClaw sessionKey；为空则走默认 owner-channel。",
     )
 
 
@@ -747,13 +765,15 @@ class MilocoSettings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        # 优先级：init（测试覆盖）> env > config.json > settings.yaml > 默认值
+        # 优先级：init（测试覆盖）> env > config.json > doorlock.yaml > settings.yaml > 默认值
         json_source = JsonConfigSource(settings_cls, _user_config_path())
+        doorlock_source = YamlConfigSource(settings_cls, _DOORLOCK_YAML)
         yaml_source = YamlConfigSource(settings_cls, _SETTINGS_YAML)
         return (
             init_settings,
             env_settings,
             json_source,
+            doorlock_source,
             yaml_source,
         )
 

@@ -430,11 +430,12 @@ class MIoTDeviceStateEvent(BaseModel):
 
 
 class MIoTDeviceEvent(BaseModel):
-    """Decoded `device/{did}/event/{siid}.{eiid}` payload.
+    """Decoded MIoT device event payload.
 
-    Device-level event push (e.g., doorbell-ring, someone-at-the-door).
-    `did`, `siid`, and `eiid` come from the topic; the payload is
-    undocumented and kept in `raw`.
+    The normal cloud topic is `device/{did}/up/event_occured/{siid}/{eiid}`
+    (MIoT keeps the historical `occured` spelling). Some older event paths use
+    `device/{did}/event/{siid}.{eiid}`; callers can subscribe to both while the
+    decoded event shape remains the same.
     """
 
     did: str = Field(description="Device id")

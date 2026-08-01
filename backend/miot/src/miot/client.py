@@ -172,8 +172,10 @@ class MIoTClient:
         self._callback_user_bind = None
         self._callback_device_meta_changed = None
         self._callback_device_state_changed = None
+        self._callback_device_event = None
         self._meta_sub_dids = set()
         self._state_sub_dids = set()
+        self._event_sub_keys = set()
         self._scene_sub_home_ids = set()
         self._callback_scene_changed = None
         self._callback_device_event = None
@@ -931,6 +933,33 @@ class MIoTClient:
                 len(dids),
             )
 
+        # Same replay for exact per-device event subscriptions.
+        if self._event_sub_keys:
+            keys = sorted(self._event_sub_keys)
+            self._event_sub_keys = set()
+            ok = 0
+            for did, siid, eiid in keys:
+                try:
+                    if siid == -1 and eiid == -1:
+                        await self.sub_device_events_async(did)
+                    else:
+                        await self.sub_device_event_async(did, siid, eiid)
+                    ok += 1
+                except Exception as e:
+                    _LOGGER.error(
+                        "mips_cloud re-subscribe device-event FAILED "
+                        "did=%s siid=%s eiid=%s: %s",
+                        did,
+                        siid,
+                        eiid,
+                        e,
+                    )
+            _LOGGER.info(
+                "mips_cloud re-subscribed device-event for %d/%d events",
+                ok,
+                len(keys),
+            )
+
     def register_user_bind_callback(
         self, callback: Optional[Callable[[MIoTDeviceBindEvent], Any]]
     ) -> None:
@@ -1048,6 +1077,74 @@ class MIoTClient:
             return
         await mips.unsub_device_state_async(did)
 
+    def register_device_event_callback(
+        self, callback: Optional[Callable[[MIoTDeviceEvent], Any]]
+    ) -> None:
+        """Register the single device-event handler.
+
+        Fires for explicitly subscribed `device/{did}/up/event_occured/{siid}/{eiid}`
+        topics. Pass None to clear.
+        """
+        self._callback_device_event = callback
+
+    def _on_device_event_msg(self, msg: MIoTDeviceEvent) -> None:
+        cb = self._callback_device_event
+        if cb is None:
+            return
+        ret = cb(msg)
+        if asyncio.iscoroutine(ret):
+            asyncio.ensure_future(ret)
+
+    async def sub_device_event_async(self, did: str, siid: int, eiid: int) -> None:
+        """Subscribe one exact device MIoT event topic (idempotent)."""
+        key = (did, int(siid), int(eiid))
+        if key in self._event_sub_keys:
+            return
+        mips = self._mips_cloud
+        if mips is None or not mips.is_connected:
+            self._event_sub_keys.add(key)
+            return
+        await mips.sub_device_event_async(
+            did, int(siid), int(eiid), self._on_device_event_msg
+        )
+        self._event_sub_keys.add(key)
+
+    async def unsub_device_event_async(self, did: str, siid: int, eiid: int) -> None:
+        """Unsubscribe one exact device MIoT event topic."""
+        key = (did, int(siid), int(eiid))
+        self._event_sub_keys.discard(key)
+        mips = self._mips_cloud
+        if mips is None:
+            return
+        await mips.unsub_device_event_async(did, int(siid), int(eiid))
+
+    async def sub_device_events_async(self, did: str) -> None:
+        """Subscribe all MIoT events for one device (idempotent by did)."""
+        key = (did, -1, -1)
+        if key in self._event_sub_keys:
+            return
+        mips = self._mips_cloud
+        if mips is None or not mips.is_connected:
+            self._event_sub_keys.add(key)
+            return
+        await mips.sub_device_events_async(did, self._on_device_event_msg)
+        self._event_sub_keys.add(key)
+
+    async def unsub_device_events_async(self, did: str) -> None:
+        """Unsubscribe all MIoT events for one device."""
+        key = (did, -1, -1)
+        self._event_sub_keys.discard(key)
+        mips = self._mips_cloud
+        if mips is None:
+            return
+        await mips.unsub_device_events_async(did)
+
+    async def sub_legacy_device_event_async(self, did: str, siid: int, eiid: int) -> None:
+        mips = self._mips_cloud
+        if mips is None or not mips.is_connected:
+            return
+        await mips.sub_legacy_device_event_async(did, siid, eiid, self._on_device_event_msg)
+
     def register_scene_changed_callback(
         self, callback: Optional[Callable[[MIoTSceneChangedEvent], Any]]
     ) -> None:
@@ -1093,49 +1190,6 @@ class MIoTClient:
         if mips is None:
             return
         await mips.unsub_home_scene_changed_async(home_id)
-
-    def register_device_event_callback(
-        self, callback: Optional[Callable[[MIoTDeviceEvent], Any]]
-    ) -> None:
-        """Register the single device-event handler.
-
-        Fires for every subscribed device's events (e.g., doorbell-ring,
-        someone-at-the-door). Pass None to clear.
-        """
-        self._callback_device_event = callback
-
-    def _on_device_event_msg(self, msg: MIoTDeviceEvent) -> None:
-        cb = self._callback_device_event
-        if cb is None:
-            return
-        ret = cb(msg)
-        if asyncio.iscoroutine(ret):
-            asyncio.ensure_future(ret)
-
-    async def sub_device_event_async(self, did: str, siid: int, eiid: int) -> None:
-        """Subscribe one device's `device/{did}/event/{siid}.{eiid}` topic (idempotent).
-
-        `_event_subscriptions` tracks (did, siid, eiid) tuples confirmed
-        subscribed at the broker. Same ownership model as sub_device_meta_async.
-        """
-        key = (did, siid, eiid)
-        if key in self._event_subscriptions:
-            return
-        mips = self._mips_cloud
-        if mips is None or not mips.is_connected:
-            self._event_subscriptions.add(key)
-            return
-        await mips.sub_device_event_async(did, siid, eiid, self._on_device_event_msg)
-        self._event_subscriptions.add(key)
-
-    async def unsub_device_event_async(self, did: str, siid: int, eiid: int) -> None:
-        """Unsubscribe one device's event topic."""
-        key = (did, siid, eiid)
-        self._event_subscriptions.discard(key)
-        mips = self._mips_cloud
-        if mips is None:
-            return
-        await mips.unsub_device_event_async(did, siid, eiid)
 
     def register_mips_connect_callback(
         self, callback: Optional[Callable[[], Any]]

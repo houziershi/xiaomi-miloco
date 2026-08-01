@@ -10,6 +10,7 @@ import copy
 import json
 import logging
 import time
+import uuid
 from collections.abc import Callable, Coroutine
 
 from av.audio.frame import AudioFrame
@@ -36,6 +37,7 @@ from pydantic_core import to_jsonable_python
 
 from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
+from miloco.dispatch.dispatcher import dispatch_event
 from miloco.miot.camera_handler import CameraVisionHandler
 from miloco.miot.filter import (
     is_home_allowed,
@@ -51,8 +53,13 @@ from miloco.miot.mips_listeners import (
 )
 from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
 from miloco.miot.welcome_service import DeviceWelcomeService
+from miloco.utils.agent_client import run_agent_turn
 
 logger = logging.getLogger(__name__)
+
+
+def _join_device_event_text(items: list[object]) -> str:
+    return "\n".join(str(item) for item in items if str(item).strip())
 
 
 def _resolve_camera_switch_iids(spec: dict) -> list[tuple[int, int]]:
@@ -189,6 +196,7 @@ class MiotProxy:
         # online/offline state; drives the diff in
         # _sync_camera_state_subscriptions.
         self._subscribed_state_dids: set[str] = set()
+        self._subscribed_doorbell_event: tuple[str, int, int] | None = None
 
         # Listener for doorbell events (doorbell-ring, someone-at-the-door).
         # When triggered, it activates the lock camera for a configured duration.
@@ -279,6 +287,7 @@ class MiotProxy:
             refresh_camera_online_status=self.refresh_camera_online_status
         )
         self._subscribed_state_dids = set()
+        self._subscribed_doorbell_event: tuple[str, int, int] | None = None
         self._miot_client.register_user_bind_callback(self._on_user_bind_event)
         # Device meta change (rename/hr_change): refresh the list so the new
         # name/room/home propagates. Kept off the bind welcome path.
@@ -291,6 +300,8 @@ class MiotProxy:
         self._miot_client.register_device_state_changed_callback(
             self._on_camera_state_changed_event
         )
+        # Device MIoT event push: currently used for doorbell button events.
+        self._miot_client.register_device_event_callback(self._on_device_event)
         # Home scene change (rename/delete/edit): refresh the scene list.
         self._miot_client.register_scene_changed_callback(self._on_scene_changed_event)
         # Device events (doorbell-ring, someone-at-the-door, etc.): trigger
@@ -365,6 +376,7 @@ class MiotProxy:
         self._subscribed_meta_dids = set()
         self._subscribed_state_dids = set()
         self._subscribed_scene_home_ids = set()
+        self._subscribed_doorbell_event = None
         # Welcome service survives deinit (rebuilt only in __init__), but its
         # dedup window state must reset alongside the other in-memory caches —
         # otherwise a re-bind of the same did within WELCOME_DEDUP_SEC after an
@@ -832,6 +844,7 @@ class MiotProxy:
                 await self._sync_meta_subscriptions()
                 await self._sync_scene_subscriptions()
                 await self._sync_lock_device_subscriptions()
+                await self._sync_doorbell_subscription()
                 return devices
             except Exception as e:
                 logger.error("Failed to refresh devices: %s", e)
@@ -916,6 +929,67 @@ class MiotProxy:
             )
         await self._camera_state_listener.on_event(msg)
 
+    async def _forward_configured_doorbell_event(self, msg: MIoTDeviceEvent) -> None:
+        """Forward configured device events to the owner OpenClaw session."""
+        settings = get_settings().miot
+        if not settings.doorbell_did:
+            return
+        if msg.did == settings.doorbell_did:
+            logger.warning(
+                "[DOORBELL-RAW] did=%s siid=%s eiid=%s raw=%r",
+                msg.did,
+                msg.siid,
+                msg.eiid,
+                msg.raw,
+            )
+        if (
+            msg.did != settings.doorbell_did
+            or msg.siid != settings.doorbell_siid
+            or msg.eiid != settings.doorbell_eiid
+        ):
+            logger.debug(
+                "ignoring unconfigured device event did=%s siid=%s eiid=%s",
+                msg.did,
+                msg.siid,
+                msg.eiid,
+            )
+            return
+
+        device = self._device_info_dict.get(msg.did)
+        device_name = getattr(device, "name", None) or msg.did
+        room_name = getattr(device, "room_name", None) or ""
+        value = None
+        params = msg.raw.get("params") if isinstance(msg.raw, dict) else None
+        arguments = params.get("arguments") if isinstance(params, dict) else None
+        if isinstance(arguments, list) and arguments:
+            first = arguments[0]
+            if isinstance(first, dict):
+                value = first.get("value")
+
+        text = f"门铃被按下：{device_name}"
+        if room_name:
+            text += f"（{room_name}）"
+        if value is not None:
+            text += f"。事件值：{value}"
+        logger.info(
+            "doorbell event received did=%s siid=%s eiid=%s value=%s",
+            msg.did,
+            msg.siid,
+            msg.eiid,
+            value,
+        )
+        if settings.doorbell_session_key:
+            trace_id = str(uuid.uuid4())
+            await run_agent_turn(
+                text,
+                session_key=settings.doorbell_session_key,
+                lane="miloco-interactive",
+                trace_id=trace_id,
+                wait_timeout_ms=get_settings().dispatcher.turn_wait_timeout_ms,
+            )
+            return
+        await dispatch_event("device_event", [text], _join_device_event_text)
+
     def _is_move_into_scope(self, msg: MIoTDeviceBindEvent) -> bool:
         """True if an hr_change moved a device into a managed home from an
         unmanaged one.
@@ -996,6 +1070,68 @@ class MiotProxy:
             len(self._subscribed_meta_dids),
         )
 
+    async def _sync_doorbell_subscription(self) -> None:
+        """Subscribe configured doorbell device events, if any."""
+        settings = get_settings().miot
+        did = (settings.doorbell_did or "").strip()
+        target = (
+            (did, int(settings.doorbell_siid), int(settings.doorbell_eiid))
+            if did
+            else None
+        )
+        current = self._subscribed_doorbell_event
+        if current == target:
+            return
+
+        if current is not None:
+            old_did, old_siid, old_eiid = current
+            try:
+                await self._miot_client.unsub_device_events_async(old_did)
+            except Exception as e:
+                logger.error(
+                    "unsubscribe doorbell event failed did=%s siid=%s eiid=%s: %s",
+                    old_did,
+                    old_siid,
+                    old_eiid,
+                    e,
+                )
+            self._subscribed_doorbell_event = None
+
+        if target is None:
+            return
+
+        new_did, new_siid, new_eiid = target
+        try:
+            legacy_sub = getattr(self._miot_client, "sub_legacy_device_event_async", None)
+            if callable(legacy_sub):
+                try:
+                    await legacy_sub(new_did, new_siid, new_eiid)
+                except Exception as e:
+                    logger.warning(
+                        "legacy doorbell event subscribe failed did=%s siid=%s eiid=%s: %s",
+                        new_did,
+                        new_siid,
+                        new_eiid,
+                        e,
+                    )
+            await self._miot_client.sub_device_events_async(new_did)
+        except Exception as e:
+            logger.error(
+                "subscribe doorbell event failed did=%s siid=%s eiid=%s: %s",
+                new_did,
+                new_siid,
+                new_eiid,
+                e,
+            )
+            return
+        self._subscribed_doorbell_event = target
+        logger.info(
+            "doorbell event subscription synced: did=%s siid=%s eiid=%s",
+            new_did,
+            new_siid,
+            new_eiid,
+        )
+
     async def _sync_camera_state_subscriptions(self) -> None:
         """Reconcile per-device cloud state (online/offline) subs to the
         camera list.
@@ -1066,11 +1202,7 @@ class MiotProxy:
         logger.warning("[DEBUG-EVENT] topic=%s payload=%s", topic, payload.decode(errors="replace"))
 
     async def _on_device_event(self, msg: MIoTDeviceEvent) -> None:
-        """Forward device events (doorbell-ring, someone-at-the-door) to the listener.
-
-        The debounce + trigger logic lives in
-        ``miloco.miot.mips_listeners.DoorbellEventListener``.
-        """
+        """Forward device events to OpenClaw and lock-camera listeners."""
         logger.info(
             "Device event received: did=%s siid=%d eiid=%d raw=%r",
             msg.did,
@@ -1078,7 +1210,10 @@ class MiotProxy:
             msg.eiid,
             msg.raw,
         )
-        await self._doorbell_listener.on_event(msg)
+        await self._forward_configured_doorbell_event(msg)
+        doorbell_listener = getattr(self, "_doorbell_listener", None)
+        if doorbell_listener is not None:
+            await doorbell_listener.on_event(msg)
 
     async def _on_doorbell_event(self, event: MIoTDeviceEvent) -> None:
         """Handle doorbell event: start lock camera recording for configured duration.
@@ -1271,7 +1406,7 @@ class MiotProxy:
         Discovers lock devices with doorbell/camera capabilities and subscribes
         to their doorbell-ring and someone-at-the-door events.
         """
-        from miot.camera import MIoTCameraExtraInfo, is_camera_model
+        from miot.camera import is_camera_model
 
         # Find lock devices in the device list
         new_lock_devices: dict[str, dict[str, tuple[int, int]]] = {}
@@ -1411,7 +1546,8 @@ class MiotProxy:
 
     async def _get_camera_extra_info(self):
         """Get camera extra info from the config file."""
-        from miot.camera import MIoTCameraExtraInfo, get_camera_extra_info
+        from miot.camera import get_camera_extra_info
+
         return await get_camera_extra_info()
 
     def get_mips_status(self) -> dict:

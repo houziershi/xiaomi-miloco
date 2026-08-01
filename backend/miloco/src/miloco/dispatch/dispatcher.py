@@ -34,7 +34,9 @@ from miloco.observability.agent_meta_poller import AgentRunSource, track_agent_r
 
 logger = logging.getLogger(__name__)
 
-EventType = Literal["interaction", "bind", "rule", "suggestion", "onboarding"]
+EventType = Literal[
+    "interaction", "bind", "rule", "suggestion", "onboarding", "device_event"
+]
 
 # builder：把「合并后的同类条目列表」重构成一条 message（单一头、统一编号）。
 # 返回 None/空 → drainer 跳过该批。dispatcher 不感知 items 的具体业务类型。
@@ -46,6 +48,7 @@ _ROUTE: dict[EventType, tuple[str, str, int]] = {
     "interaction": ("agent:main:miloco", "miloco-interactive", 0),
     "rule": ("agent:main:miloco-rule", "miloco-rule", 10),
     "suggestion": ("agent:main:miloco-suggest", "miloco-suggest", 20),
+    "device_event": ("agent:main:miloco", "miloco-interactive", 25),
     "bind": ("agent:main:miloco", "miloco-interactive", 30),
     "onboarding": ("agent:main:miloco", "miloco-interactive", 30),
 }
@@ -72,6 +75,7 @@ _TRACKED: frozenset[EventType] = frozenset({"interaction", "rule", "suggestion"}
 # channel 会话。其余类型不在表内 → 空 dict → 行为完全不变（后台 turn）。
 _DELIVERY: dict[EventType, dict[str, Any]] = {
     "onboarding": {"resolve_target": "owner-channel", "deliver": True},
+    "device_event": {"resolve_target": "owner-channel", "deliver": True},
 }
 
 # send_turn profile 按事件类型映射。不在表内的类型（interaction/bind/onboarding）

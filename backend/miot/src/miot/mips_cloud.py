@@ -110,10 +110,12 @@ _TOPIC_DEVICE_STATE = re.compile(
     r"^device/([^/]+)/state/(" + "|".join(_DEVICE_STATE_OPS) + r")$"
 )
 
-# Device-level events: `device/{did}/event/{siid}.{eiid}`.
-# did = group(1), siid = group(2), eiid = group(3). The topic format is
-# exact — no wildcard subscription is needed since we subscribe per-siid.eiid.
-_TOPIC_DEVICE_EVENT = re.compile(r"^device/([^/]+)/event/(\d+)\.(\d+)$")
+# Device-level MIoT events: `device/{did}/up/event_occured/{siid}/{eiid}`.
+# The broker topic uses the misspelled `event_occured`; keep it exact.
+_TOPIC_DEVICE_EVENT = re.compile(
+    r"^device/([^/]+)/up/event_occured/(\d+)/(\d+)$"
+)
+_TOPIC_LEGACY_DEVICE_EVENT = re.compile(r"^device/([^/]+)/event/(\d+)\.(\d+)$")
 
 
 # Handler signatures accepted by sub_*_async methods. They receive a fully
@@ -511,16 +513,43 @@ class MIoTMipsCloud:
     async def sub_device_event_async(
         self, did: str, siid: int, eiid: int, handler: DeviceEventHandler
     ) -> None:
+        """Subscribe one exact device event topic."""
         topic = f"device/{did}/up/event_occured/{siid}/{eiid}"
-        decoder = self._make_device_event_decoder()
-        await self._subscribe_async(topic, handler, decoder)
+        await self._subscribe_async(topic, handler, self._make_device_event_decoder())
 
     async def unsub_device_event_async(
         self, did: str, siid: int, eiid: int
     ) -> None:
-        """Unsubscribe a device's event topic."""
+        """Unsubscribe a device's exact event topic."""
         topic = f"device/{did}/up/event_occured/{siid}/{eiid}"
         await self._unsubscribe_async(topic)
+
+    async def sub_device_events_async(
+        self, did: str, handler: DeviceEventHandler
+    ) -> None:
+        """Subscribe all device event pushes for one device.
+
+        Some MIoT broker ACLs reject exact event leaves while allowing the
+        device-scoped `event_occured/#` topic. Callers should filter the decoded
+        `(siid, eiid)` they care about.
+        """
+        await self._subscribe_async(
+            f"device/{did}/up/event_occured/#",
+            handler,
+            self._make_device_event_decoder(),
+        )
+
+    async def unsub_device_events_async(self, did: str) -> None:
+        await self._unsubscribe_async(f"device/{did}/up/event_occured/#")
+
+    async def sub_legacy_device_event_async(
+        self, did: str, siid: int, eiid: int, handler: DeviceEventHandler
+    ) -> None:
+        await self._subscribe_async(
+            f"device/{did}/event/{siid}.{eiid}",
+            handler,
+            self._make_device_event_decoder(),
+        )
 
     async def sub_device_event_debug_async(
         self, did: str, handler: Callable[[str, bytes], Union[None, Awaitable[None]]]
@@ -926,46 +955,23 @@ class MIoTMipsCloud:
     def _make_device_event_decoder() -> Callable[
         [str, bytes], Optional[MIoTDeviceEvent]
     ]:
-        # Device-level events: did + siid + eiid come from the topic;
-        # the payload is undocumented and kept verbatim in `raw`.
         def decode(topic: str, payload: bytes) -> Optional[MIoTDeviceEvent]:
-            m = _TOPIC_DEVICE_EVENT.match(topic)
-            if not m:
+            match = _TOPIC_DEVICE_EVENT.match(topic) or _TOPIC_LEGACY_DEVICE_EVENT.match(
+                topic
+            )
+            if not match:
                 return None
-            did = m.group(1)
-            siid = int(m.group(2))
-            eiid = int(m.group(3))
             raw = _parse_json_payload(payload) or {}
             return MIoTDeviceEvent(
-                did=did,
-                siid=siid,
-                eiid=eiid,
+                did=match.group(1),
+                siid=int(match.group(2)),
+                eiid=int(match.group(3)),
                 raw=raw if isinstance(raw, dict) else {},
                 timestamp_ms=_now_ms(),
             )
 
         return decode
 
-
-# ---------------------------------------------------------------- helpers
-
-
-def _parse_json_payload(payload: bytes) -> Optional[dict]:
-    if not payload:
-        return None
-    try:
-        decoded = json.loads(payload)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    if isinstance(decoded, dict):
-        return decoded
-    return None
-
-
-def _now_ms() -> int:
-    import time
-
-    return int(time.time() * 1000)
 
 
 # Human-readable summary of MQTT v5 SUBACK reason codes likely to surface
@@ -988,3 +994,22 @@ _REASON_CODES = {
 
 def _describe_reason_code(code: int) -> str:
     return _REASON_CODES.get(code, f"reason_code=0x{code:02x}")
+
+# ---------------------------------------------------------------- helpers
+
+
+def _parse_json_payload(payload: bytes) -> Optional[dict]:
+    if not payload:
+        return None
+    try:
+        data = json.loads(payload.decode("utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        _LOGGER.debug("failed to parse MIPS JSON payload", exc_info=True)
+    return None
+
+
+def _now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)

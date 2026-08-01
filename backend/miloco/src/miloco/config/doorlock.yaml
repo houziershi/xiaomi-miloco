@@ -1,0 +1,39 @@
+# 门锁 / 门铃事件专用配置
+#
+# 这个文件放在仓库内，作为 Miloco 的门锁默认配置模板；运行时加载优先级低于
+# $MILOCO_HOME/config.json 和 MILOCO_* 环境变量，高于通用 settings.yaml。
+#
+# 生产使用建议：
+# - 把真实 did、siid、eiid、session_key 写入 $MILOCO_HOME/config.json，避免把个人设备
+#   标识和本机 OpenClaw 会话提交到仓库；
+# - 若要在仓库分支里固定某套开发环境，可直接修改本文件。
+#
+# MIoT 事件 topic 形如：
+#   device/{did}/up/event_occured/{siid}/{eiid}
+# 注意：MIoT broker/topic 使用历史拼写 event_occured，不是 event_occurred。
+
+miot:
+  # doorbell_did
+  #   门锁/门铃设备的 MIoT did。
+  #   为空（null 或 ""）时，Miloco 不订阅门铃事件，也不会向 OpenClaw 投递门铃消息。
+  #   可从日志 [DEBUG-EVENT] topic=device/{did}/... 或设备列表里取得。
+  doorbell_did: null
+
+  # doorbell_siid
+  #   门铃事件所在服务的 siid。与 doorbell_eiid 一起定位具体事件。
+  #   当前已验证的小米智能门锁 5 Max 内外双摄门铃事件为 siid=7。
+  doorbell_siid: 7
+
+  # doorbell_eiid
+  #   门铃事件的 eiid。与 doorbell_siid 一起定位具体事件。
+  #   当前已验证的小米智能门锁 5 Max 内外双摄门铃事件为 eiid=1006。
+  doorbell_eiid: 1006
+
+  # doorbell_session_key
+  #   门铃事件要投递到的 OpenClaw sessionKey。
+  #   例如浏览器 URL：
+  #     http://127.0.0.1:18789/chat?session=agent%3Amain%3Adashboard%3Axxxx
+  #   对应 sessionKey：
+  #     agent:main:dashboard:xxxx
+  #   为空时使用 Miloco 默认 owner-channel 路由（由 OpenClaw 解析最近/已绑定通知会话）。
+  doorbell_session_key: null

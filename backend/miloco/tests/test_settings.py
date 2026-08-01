@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 from miloco.config import SETTINGS_SCHEMA, get_settings, reset_settings
-from miloco.config.settings import MilocoSettings
+from miloco.config.settings import _DOORLOCK_YAML, MilocoSettings
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +123,27 @@ def test_tier_u_dump_enable_env_override(monkeypatch) -> None:
 def test_notify_dedup_window_default() -> None:
     """通知去重窗口默认 60s。"""
     assert get_settings().notify.dedup_window_sec == 60.0
+
+
+def test_doorlock_yaml_documents_and_loads_defaults() -> None:
+    """门锁专用配置文件必须随包存在，并以 miot.* 结构提供默认配置。"""
+    import yaml
+
+    raw_text = _DOORLOCK_YAML.read_text(encoding="utf-8")
+    for keyword in (
+        "doorbell_did",
+        "doorbell_siid",
+        "doorbell_eiid",
+        "doorbell_session_key",
+        "event_occured",
+    ):
+        assert keyword in raw_text
+
+    data = yaml.safe_load(raw_text)
+    assert data["miot"]["doorbell_did"] is None
+    assert data["miot"]["doorbell_siid"] == 7
+    assert data["miot"]["doorbell_eiid"] == 1006
+    assert data["miot"]["doorbell_session_key"] is None
 
 
 def test_notify_dedup_window_env_override(monkeypatch) -> None:

@@ -22,8 +22,10 @@ def _isolated_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_DID", "door-did")
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SIID", "7")
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_EIID", "1006")
+    conversation_module.get_doorbell_conversation_service()._active.clear()
     reset_settings()
     yield
+    conversation_module.get_doorbell_conversation_service()._active.clear()
     reset_settings()
 
 
@@ -36,6 +38,7 @@ def _bare_proxy() -> MiotProxy:
     proxy._device_info_dict = {
         "door-did": SimpleNamespace(name="智能门锁", room_name="玄关")
     }
+    proxy._camera_info_dict = {}
     return proxy
 
 
@@ -119,6 +122,26 @@ async def test_doorbell_event_requests_openclaw_reply_audio(monkeypatch):
         "audioCommand": ["/bin/echo", "{did}", "{text}"],
     }
     assert payload["doorbellReplyAudio"]["conversationId"]
+
+
+@pytest.mark.asyncio
+async def test_doorbell_conversation_accepts_same_named_lock_camera_source(monkeypatch):
+    proxy = _bare_proxy()
+    proxy._camera_info_dict = {
+        "door-camera-did": SimpleNamespace(name="智能门锁 2"),
+        "other-camera-did": SimpleNamespace(name="其他摄像机"),
+    }
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:main:door")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_REPLY_AUDIO_COMMAND", '["/bin/echo", "{text}"]')
+    reset_settings()
+
+    run_turn = AsyncMock(return_value=("run-1", "ok", 123.0, "请说"))
+    monkeypatch.setattr(conversation_module, "run_agent_turn_detailed", run_turn)
+
+    await proxy._on_device_event(MIoTDeviceEvent(did="door-did", siid=7, eiid=1006))
+
+    conversation = next(iter(conversation_module.get_doorbell_conversation_service()._active.values()))
+    assert conversation.speech_source_dids == {"door-did", "door-camera-did"}
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,7 @@ class _Conversation:
     did: str
     siid: int
     eiid: int
+    speech_source_dids: set[str]
     visitor_turns: int = 0
     state: str = "waiting_playback"
     listen_deadline: float = 0.0
@@ -53,7 +54,15 @@ class DoorbellConversationService:
         self._schedule_timeouts = schedule_timeouts
         self._active: dict[str, _Conversation] = {}
 
-    async def start(self, *, did: str, siid: int, eiid: int, text: str) -> str | None:
+    async def start(
+        self,
+        *,
+        did: str,
+        siid: int,
+        eiid: int,
+        text: str,
+        speech_source_dids: set[str] | None = None,
+    ) -> str | None:
         settings = get_settings()
         miot = settings.miot
         if not miot.doorbell_conversation_enabled or not miot.doorbell_session_key:
@@ -64,6 +73,7 @@ class DoorbellConversationService:
             did=did,
             siid=siid,
             eiid=eiid,
+            speech_source_dids=set(speech_source_dids or {did}) | {did},
         )
         self._active[conversation_id] = conversation
         await self._run_turn(conversation, text)
@@ -165,7 +175,7 @@ class DoorbellConversationService:
                 conversation.state = "ended"
                 self._active.pop(conversation.conversation_id, None)
                 continue
-            if conversation.did in source_dids:
+            if conversation.speech_source_dids & source_dids:
                 return conversation
         return None
 

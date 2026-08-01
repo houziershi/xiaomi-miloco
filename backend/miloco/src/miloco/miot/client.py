@@ -996,6 +996,9 @@ class MiotProxy:
                     siid=msg.siid,
                     eiid=msg.eiid,
                     text=text,
+                    speech_source_dids=self._doorbell_speech_source_dids(
+                        msg.did, device_name
+                    ),
                 )
                 return
 
@@ -1021,6 +1024,28 @@ class MiotProxy:
             )
             return
         await dispatch_event("device_event", [text], _join_device_event_text)
+
+    def _doorbell_speech_source_dids(self, did: str, device_name: str) -> set[str]:
+        """Return camera/source dids that should be treated as this doorbell.
+
+        Door locks with multiple cameras may report the button event on one did
+        while perception speech comes from a sibling camera did whose display
+        name is the same lock name with a numeric suffix (for example
+        ``小米智能门锁 5 Max 内外双摄`` and ``... 内外双摄 2``).
+        """
+        source_dids = {did}
+        base_name = (device_name or "").strip()
+        if not base_name:
+            return source_dids
+        for camera_did, camera in self._camera_info_dict.items():
+            camera_name = (getattr(camera, "name", "") or "").strip()
+            if camera_did == did or camera_name == base_name:
+                source_dids.add(camera_did)
+            elif camera_name.startswith(f"{base_name} "):
+                suffix = camera_name.removeprefix(base_name).strip()
+                if suffix.isdigit():
+                    source_dids.add(camera_did)
+        return source_dids
 
     def _is_move_into_scope(self, msg: MIoTDeviceBindEvent) -> bool:
         """True if an hr_change moved a device into a managed home from an

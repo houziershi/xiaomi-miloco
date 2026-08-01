@@ -98,6 +98,26 @@ async def test_matching_complete_speech_forwards_visitor_message(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_matching_complete_speech_accepts_related_camera_did(monkeypatch):
+    service = DoorbellConversationService(clock=lambda: 100.0, schedule_timeouts=False)
+    run_turn = AsyncMock(return_value=("run-1", "ok", 100.0, "请说"))
+    monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
+    conversation_id = await service.start(
+        did="door-did",
+        siid=7,
+        eiid=1006,
+        text="门铃被按下",
+        speech_source_dids={"door-did", "door-camera-did"},
+    )
+    service.on_reply_audio_result(conversation_id, success=True)
+
+    assert await service.accept_speech(_speech("我是快递员", did="door-camera-did")) is True
+
+    assert run_turn.await_count == 2
+    assert run_turn.await_args.args == ("门外访客说：我是快递员",)
+
+
+@pytest.mark.asyncio
 async def test_ignores_incomplete_wrong_device_duplicate_and_timeout(monkeypatch):
     now = 100.0
     service = DoorbellConversationService(clock=lambda: now, schedule_timeouts=False)

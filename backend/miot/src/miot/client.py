@@ -1082,8 +1082,8 @@ class MIoTClient:
     ) -> None:
         """Register the single device-event handler.
 
-        Fires for explicitly subscribed `device/{did}/up/event_occured/{siid}/{eiid}`
-        topics. Pass None to clear.
+        Fires for subscribed device event wildcard topics such as
+        `device/{did}/up/event_occured/#`. Pass None to clear.
         """
         self._callback_device_event = callback
 

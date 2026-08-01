@@ -41,6 +41,14 @@ tail -f ~/.openclaw/miloco/log/miloco-backend.log
 
 当前已验证的小米智能门锁 5 Max 内外双摄门铃事件是 `siid=7`、`eiid=1006`。不同设备或固件可能不同，以日志为准。
 
+注意：MIoT 服务端规则要求只能订阅设备级事件通配 topic：
+
+```text
+device/<did>/up/event_occured/#
+```
+
+不能直接订阅某个具体事件 leaf，例如 `device/<did>/up/event_occured/7/1006`。Miloco 会先订阅该设备全部事件，再在收到事件后按 `siid/eiid` 过滤门铃事件。
+
 ## 3. 找到 OpenClaw 目标会话
 
 打开希望接收门铃事件的 OpenClaw 会话，浏览器 URL 类似：

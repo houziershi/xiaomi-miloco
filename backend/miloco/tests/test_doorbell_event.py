@@ -30,6 +30,8 @@ def _isolated_settings(tmp_path, monkeypatch):
 def _bare_proxy() -> MiotProxy:
     proxy = MiotProxy.__new__(MiotProxy)
     proxy._miot_client = AsyncMock()
+    proxy._miot_client.sub_legacy_device_event_async = AsyncMock()
+    proxy._miot_client.sub_device_event_async = AsyncMock()
     proxy._subscribed_doorbell_event = None
     proxy._device_info_dict = {
         "door-did": SimpleNamespace(name="智能门锁", room_name="玄关")
@@ -44,6 +46,8 @@ async def test_sync_doorbell_subscription_uses_configured_event():
     await proxy._sync_doorbell_subscription()
 
     proxy._miot_client.sub_device_events_async.assert_awaited_once_with("door-did")
+    proxy._miot_client.sub_device_event_async.assert_not_awaited()
+    proxy._miot_client.sub_legacy_device_event_async.assert_not_awaited()
     assert proxy._subscribed_doorbell_event == ("door-did", 7, 1006)
 
 

@@ -1103,7 +1103,13 @@ class MiotProxy:
         )
 
     async def _sync_doorbell_subscription(self, *, force: bool = False) -> None:
-        """Subscribe configured doorbell device events, if any."""
+        """Subscribe all configured doorbell-device events, if any.
+
+        MIoT broker ACLs only allow the device-scoped event wildcard topic
+        ``device/{did}/up/event_occured/#`` for doorbell events. Do not
+        subscribe a specific ``siid/eiid`` leaf here; filter the decoded event
+        in :meth:`_forward_configured_doorbell_event` instead.
+        """
         settings = get_settings().miot
         did = (settings.doorbell_did or "").strip()
         target = (
@@ -1134,18 +1140,6 @@ class MiotProxy:
 
         new_did, new_siid, new_eiid = target
         try:
-            legacy_sub = getattr(self._miot_client, "sub_legacy_device_event_async", None)
-            if callable(legacy_sub):
-                try:
-                    await legacy_sub(new_did, new_siid, new_eiid)
-                except Exception as e:
-                    logger.warning(
-                        "legacy doorbell event subscribe failed did=%s siid=%s eiid=%s: %s",
-                        new_did,
-                        new_siid,
-                        new_eiid,
-                        e,
-                    )
             await self._miot_client.sub_device_events_async(new_did)
         except Exception as e:
             logger.error(

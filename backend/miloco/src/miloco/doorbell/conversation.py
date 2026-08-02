@@ -63,43 +63,18 @@ _PACKAGE_CARRIERS = [
 ]
 _PICKUP_WORDS = ["取快递", "取件", "拿快递", "拿件", "寄件", "退货"]
 _CODE_RE = re.compile(r"(?:取件码|寄件码)\s*[:：是]?\s*([A-Za-z0-9-]{3,})")
-_FOOD_DELIVERY_EXCEPTION_KEYWORDS = [
-    "外卖洒",
-    "洒了",
-    "撒了",
-    "泼了",
-    "破了",
-    "漏了",
-    "打翻了",
-    "坏了",
-    "无法悬挂",
-    "当面确认",
-    "联系不上",
-]
-_FOOD_DELIVERY_NORMAL_WORDS = [
-    "我是外卖员",
-    "送外卖",
-    "送餐",
-    "外卖员",
-    "放好了",
-    "挂好了",
-    "已经放",
-    "已经挂",
-    "放哪里",
-    "放哪",
-    "挂哪里",
-    "挂哪",
-    "门把手",
-    "好的",
-    "好",
-    "谢谢",
-    "再见",
-    "没问题",
-    "可以",
-]
-_FOOD_DELIVERY_WORDS = ["外卖", "送餐", "餐", "饭", "美团", "饿了么"]
-_FOOD_DELIVERY_ESCALATION_WORDS = ["问题", "异常", "不对", "不行", "处理", "联系主人", "给主人留言", "稍等"]
 _PACKAGE_DELIVERY_EXCEPTION_KEYWORDS = ["签收", "当面交付", "到付", "贵重", "无法放置"]
+_MISTAKE_KEYWORDS = ["误按", "按错", "走错", "找错", "不好意思", "没事"]
+_OWNER_MESSAGE_SIGNALS = [
+    "给主人留言",
+    "给主人确认",
+    "联系主人",
+    "通知主人",
+    "转达给主人",
+    "稍等主人消息",
+    "马上给主人留言确认",
+]
+_FOOD_DELIVERY_ESCALATION_SIGNALS = ["外卖异常", "门口外卖出现异常", "外卖出现异常"]
 
 
 def _default_doorman_tasks_dirs() -> list[Path]:
@@ -203,16 +178,6 @@ def _matched_package_pickup_reply(visitor_text: str, tasks: list[dict[str, objec
     return None
 
 
-def _food_delivery_exception_reply(
-    visitor_text: str, conversation: _Conversation | None = None
-) -> str | None:
-    if not DoorbellConversationService._is_food_delivery_exception(
-        visitor_text, conversation=conversation
-    ):
-        return None
-    return "您好，请您先稍等一下，我马上给主人留言确认。"
-
-
 def _matched_carrier(text: str) -> str | None:
     upper_text = text.upper()
     for carrier in _PACKAGE_CARRIERS:
@@ -224,14 +189,6 @@ def _matched_carrier(text: str) -> str | None:
 def _with_deterministic_doorman_instruction(
     text: str, tasks: list[dict[str, object]], conversation: _Conversation | None = None
 ) -> str:
-    food_reply = _food_delivery_exception_reply(text, conversation=conversation)
-    if food_reply:
-        return (
-            f"{text}\n\n"
-            "门房系统已识别到外卖异常。"
-            f"本轮必须只对门外访客播报这句话：{food_reply}"
-            "不要向外卖员道歉，不要说给您添麻烦，不要追问订单信息或问题细节，不要让对方直接离开。"
-        )
     reply = _matched_package_pickup_reply(text, tasks)
     if not reply:
         return text
@@ -915,18 +872,24 @@ class DoorbellConversationService:
         }
         visitor = "；".join(conversation.visitor_messages[-3:]) or "未识别到访客语音"
         assistant = "；".join(conversation.assistant_messages[-3:]) or "无司阍回复记录"
+        is_visitor_message = DoorbellConversationService._has_owner_message_signal(conversation)
         needs_owner = DoorbellConversationService._needs_owner_attention(
             conversation,
             reason=reason,
         )
+        title = "司阍门口留言" if is_visitor_message else "司阍门口汇报"
         lines = [
-            "[司阍门口汇报]",
+            f"[{title}]",
             f"时间：{datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+        if is_visitor_message:
+            lines.append("类型：门口访客留言")
+        lines.extend([
             f"访客：{visitor}",
             f"司阍：{assistant}",
             f"状态：{reason_labels.get(reason, reason)}",
             f"需要主人处理：{'是' if needs_owner else '否'}",
-        ]
+        ])
         action_hint = DoorbellConversationService._owner_action_hint(conversation)
         if needs_owner and action_hint:
             lines.append(f"建议主Agent处理：{action_hint}")
@@ -940,78 +903,54 @@ class DoorbellConversationService:
         attention_keywords = [
             "没有取件码",
             "没有可转达",
-            "联系主人",
-            "转达给主人",
-            "留言",
             "签收",
             "当面交付",
             "到付",
             "贵重",
             "无法放置",
-            *_FOOD_DELIVERY_EXCEPTION_KEYWORDS,
-            "物业",
-            "维修",
-            "开门",
             "无法",
             "不能",
             "紧急",
+            *_OWNER_MESSAGE_SIGNALS,
         ]
+        if any(keyword in combined for keyword in _MISTAKE_KEYWORDS):
+            return False
         return any(keyword in combined for keyword in attention_keywords)
 
     @staticmethod
     def _owner_action_hint(conversation: _Conversation) -> str | None:
         combined = "\n".join(conversation.visitor_messages + conversation.assistant_messages)
-        if DoorbellConversationService._is_food_delivery_exception(combined):
+        if DoorbellConversationService._has_food_delivery_escalation_signal(conversation):
             return "外卖异常：请同步给主人；请让家里的音箱直接播报一次“门口外卖出现异常，请尽快处理”；并通过 Miloco 发送家庭场景手机通知。不要临时创建自动化。"
         if any(keyword in combined for keyword in _PACKAGE_DELIVERY_EXCEPTION_KEYWORDS):
             return "快递异常：请同步给主人，并通过 Miloco 发送家庭场景手机通知。"
+        if DoorbellConversationService._has_owner_message_signal(conversation):
+            return "门口留言：请同步给主人，并通过 Miloco 发送家庭场景手机通知。"
         return None
 
     @staticmethod
     def _miloco_owner_notification(conversation: _Conversation) -> str | None:
         combined = "\n".join(conversation.visitor_messages + conversation.assistant_messages)
         visitor = "；".join(conversation.visitor_messages[-2:]) or "门口有访客"
-        if DoorbellConversationService._is_food_delivery_exception(combined):
+        if DoorbellConversationService._has_food_delivery_escalation_signal(conversation):
             return f"门口外卖异常：{visitor}。请尽快处理。"
         if any(keyword in combined for keyword in _PACKAGE_DELIVERY_EXCEPTION_KEYWORDS):
             return f"门口快递异常：{visitor}。请尽快处理。"
+        if DoorbellConversationService._has_owner_message_signal(conversation):
+            return f"门口留言：{visitor}。"
         return None
 
     @staticmethod
-    def _is_food_delivery_exception(
-        combined: str, *, conversation: _Conversation | None = None
-    ) -> bool:
-        has_food_context = DoorbellConversationService._has_food_delivery_context(
-            combined, conversation=conversation
-        )
-        if not has_food_context:
+    def _has_owner_message_signal(conversation: _Conversation) -> bool:
+        combined = "\n".join(conversation.assistant_messages)
+        if any(keyword in combined for keyword in _MISTAKE_KEYWORDS):
             return False
-        if any(keyword in combined for keyword in _FOOD_DELIVERY_EXCEPTION_KEYWORDS):
-            return True
-        if any(keyword in combined for keyword in _FOOD_DELIVERY_ESCALATION_WORDS):
-            return True
-        if not conversation or not conversation.visitor_messages:
-            return False
-        current = combined.replace(get_settings().miot.doorbell_visitor_message_prefix, "").strip()
-        if not current:
-            return False
-        previous = "\n".join(
-            conversation.visitor_messages[:-1] + conversation.assistant_messages
-        )
-        if not DoorbellConversationService._has_food_delivery_context(previous):
-            return False
-        return not any(keyword in current for keyword in _FOOD_DELIVERY_NORMAL_WORDS)
+        return any(keyword in combined for keyword in _OWNER_MESSAGE_SIGNALS)
 
     @staticmethod
-    def _has_food_delivery_context(
-        text: str, *, conversation: _Conversation | None = None
-    ) -> bool:
-        if any(word in text for word in _FOOD_DELIVERY_WORDS):
-            return True
-        if conversation is None:
-            return False
-        history = "\n".join(conversation.visitor_messages + conversation.assistant_messages)
-        return any(word in history for word in _FOOD_DELIVERY_WORDS)
+    def _has_food_delivery_escalation_signal(conversation: _Conversation) -> bool:
+        combined = "\n".join(conversation.visitor_messages + conversation.assistant_messages)
+        return any(keyword in combined for keyword in _FOOD_DELIVERY_ESCALATION_SIGNALS)
 
     @staticmethod
     def _should_end_after_reply(conversation: _Conversation) -> bool:

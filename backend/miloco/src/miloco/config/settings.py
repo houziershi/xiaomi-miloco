@@ -277,6 +277,18 @@ class MiotSettings(BaseModel):
         default=15.0,
         description="每次门锁回复音频播放成功后，等待门外访客说话的时间窗口（秒）。",
     )
+    doorbell_audio_activity_extend_seconds: float = Field(
+        default=15.0,
+        description="访客监听窗口内检测到门铃来源人声/音频活动但尚未形成完整转写时，向后延长监听窗口的秒数。",
+    )
+    doorbell_audio_activity_min_speech_probability: float = Field(
+        default=0.5,
+        description="触发门铃监听延长的人声概率阈值。",
+    )
+    doorbell_audio_activity_min_energy: float = Field(
+        default=0.1,
+        description="触发门铃监听延长的音频能量阈值。",
+    )
     doorbell_max_turns: int = Field(
         default=3,
         description="单次门铃会话最多接收并转发的访客语音轮数；达到后结束会话。",
@@ -292,6 +304,14 @@ class MiotSettings(BaseModel):
     doorbell_silence_fallback_text: str = Field(
         default="我没有听到您的声音，请稍后再按门铃。",
         description="访客静默超时后直接播放到门锁的固定兜底文案，不再调用 OpenClaw 生成回复。",
+    )
+    doorbell_debug_audio_enabled: bool = Field(
+        default=False,
+        description="是否保存门铃会话期间门锁传入的解码音频，用于调试 ASR。",
+    )
+    doorbell_debug_audio_dir: str = Field(
+        default="",
+        description="门铃调试音频保存目录；为空时默认写入 $MILOCO_HOME/debug/doorbell-audio。",
     )
 
 

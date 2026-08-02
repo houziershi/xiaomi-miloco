@@ -58,7 +58,6 @@ from miloco.utils.agent_client import run_agent_turn
 
 logger = logging.getLogger(__name__)
 
-
 def _join_device_event_text(items: list[object]) -> str:
     return "\n".join(str(item) for item in items if str(item).strip())
 
@@ -198,6 +197,7 @@ class MiotProxy:
         # _sync_camera_state_subscriptions.
         self._subscribed_state_dids: set[str] = set()
         self._subscribed_doorbell_event: tuple[str, int, int] | None = None
+        self._doorbell_subscription_retry_task: asyncio.Task | None = None
 
         # Listener for doorbell events (doorbell-ring, someone-at-the-door).
         # When triggered, it activates the lock camera for a configured duration.
@@ -209,6 +209,10 @@ class MiotProxy:
         self._lock_devices: dict[str, dict[str, tuple[int, int]]] = {}
         # Active lock camera recording sessions: did -> asyncio.Task
         self._lock_camera_tasks: dict[str, asyncio.Task] = {}
+        self._lock_camera_hold_deadlines: dict[str, float] = {}
+        get_doorbell_conversation_service().set_keep_stream_alive(
+            self.keep_lock_camera_stream_alive
+        )
 
     def _build_bind_listener(self) -> BindEventListener:
         """Build a fresh BindEventListener.
@@ -305,10 +309,6 @@ class MiotProxy:
         self._miot_client.register_device_event_callback(self._on_device_event)
         # Home scene change (rename/delete/edit): refresh the scene list.
         self._miot_client.register_scene_changed_callback(self._on_scene_changed_event)
-        # Device events (doorbell-ring, someone-at-the-door, etc.): trigger
-        # lock camera recording.
-        self._miot_client.register_device_event_callback(self._on_device_event)
-
         await self._miot_client.init_async()
 
         # After MQTT (re)connect, unconditionally refresh the device list — the
@@ -339,11 +339,16 @@ class MiotProxy:
         self._scene_listener.deinit()
         self._camera_state_listener.deinit()
         self._doorbell_listener.deinit()
+        get_doorbell_conversation_service().set_keep_stream_alive(None)
+        if self._doorbell_subscription_retry_task:
+            self._doorbell_subscription_retry_task.cancel()
+            self._doorbell_subscription_retry_task = None
 
         # Cancel any active lock camera recording tasks
         for task in self._lock_camera_tasks.values():
             task.cancel()
         self._lock_camera_tasks.clear()
+        self._lock_camera_hold_deadlines.clear()
 
         # 2. Destroy all camera_img_managers
         for mgr in self._camera_img_managers.values():
@@ -378,6 +383,8 @@ class MiotProxy:
         self._subscribed_state_dids = set()
         self._subscribed_scene_home_ids = set()
         self._subscribed_doorbell_event = None
+        self._doorbell_subscription_retry_task = None
+        self._lock_camera_hold_deadlines = {}
         # Welcome service survives deinit (rebuilt only in __init__), but its
         # dedup window state must reset alongside the other in-memory caches —
         # otherwise a re-bind of the same did within WELCOME_DEDUP_SEC after an
@@ -739,6 +746,14 @@ class MiotProxy:
                     )
                 )
                 active = {physical_camera_did(d) for d in active_channels}
+                held = self.held_lock_camera_dids()
+                if held:
+                    active |= held
+                    logger.info(
+                        "Camera streaming set includes doorbell-held locks: held=%s active=%s",
+                        sorted(held),
+                        sorted(active),
+                    )
                 logger.debug(
                     "Camera streaming set: channels=%s physical=%s managers=%s",
                     sorted(active_channels),
@@ -950,11 +965,15 @@ class MiotProxy:
                 msg.eiid,
                 msg.raw,
             )
-        if (
-            msg.did != settings.doorbell_did
-            or msg.siid != settings.doorbell_siid
-            or msg.eiid != settings.doorbell_eiid
-        ):
+        configured_event = (
+            int(settings.doorbell_siid),
+            int(settings.doorbell_eiid),
+        )
+        actual_event = (int(msg.siid), int(msg.eiid))
+        is_doorbell_trigger = (
+            msg.did == settings.doorbell_did and actual_event == configured_event
+        )
+        if not is_doorbell_trigger:
             logger.debug(
                 "ignoring unconfigured device event did=%s siid=%s eiid=%s",
                 msg.did,
@@ -962,7 +981,6 @@ class MiotProxy:
                 msg.eiid,
             )
             return
-
         device = self._device_info_dict.get(msg.did)
         device_name = getattr(device, "name", None) or msg.did
         room_name = getattr(device, "room_name", None) or ""
@@ -1212,14 +1230,85 @@ class MiotProxy:
                 new_eiid,
                 e,
             )
+            self._schedule_doorbell_subscription_retry(target)
             return
         self._subscribed_doorbell_event = target
+        if self._doorbell_subscription_retry_task:
+            self._doorbell_subscription_retry_task.cancel()
+            self._doorbell_subscription_retry_task = None
         logger.info(
             "doorbell event subscription synced: did=%s siid=%s eiid=%s",
             new_did,
             new_siid,
             new_eiid,
         )
+
+    def _schedule_doorbell_subscription_retry(
+        self, target: tuple[str, int, int], *, delay_seconds: float = 10.0
+    ) -> None:
+        existing = self._doorbell_subscription_retry_task
+        if existing is not None and not existing.done():
+            logger.info(
+                "doorbell event subscription retry already scheduled did=%s siid=%s eiid=%s",
+                target[0],
+                target[1],
+                target[2],
+            )
+            return
+
+        async def _retry() -> None:
+            try:
+                await asyncio.sleep(delay_seconds)
+                settings = get_settings().miot
+                current_target = (
+                    (settings.doorbell_did, settings.doorbell_siid, settings.doorbell_eiid)
+                    if settings.doorbell_did
+                    else None
+                )
+                if current_target != target:
+                    logger.info(
+                        "doorbell event subscription retry skipped: target changed old=%s new=%s",
+                        target,
+                        current_target,
+                    )
+                    return
+                logger.info(
+                    "doorbell event subscription retrying did=%s siid=%s eiid=%s",
+                    target[0],
+                    target[1],
+                    target[2],
+                )
+                await self.refresh_devices(force_doorbell_subscription=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "doorbell event subscription retry failed did=%s siid=%s eiid=%s: %s",
+                    target[0],
+                    target[1],
+                    target[2],
+                    e,
+                )
+            finally:
+                if self._doorbell_subscription_retry_task is asyncio.current_task():
+                    self._doorbell_subscription_retry_task = None
+
+        try:
+            self._doorbell_subscription_retry_task = asyncio.create_task(_retry())
+            logger.info(
+                "doorbell event subscription retry scheduled did=%s siid=%s eiid=%s delay=%.1fs",
+                target[0],
+                target[1],
+                target[2],
+                delay_seconds,
+            )
+        except RuntimeError:
+            logger.debug(
+                "doorbell event subscription retry not scheduled outside running loop did=%s siid=%s eiid=%s",
+                target[0],
+                target[1],
+                target[2],
+            )
 
     async def _sync_camera_state_subscriptions(self) -> None:
         """Reconcile per-device cloud state (online/offline) subs to the
@@ -1300,32 +1389,94 @@ class MiotProxy:
             msg.raw,
         )
         await self._forward_configured_doorbell_event(msg)
+        settings = get_settings().miot
+        if not (
+            msg.did == settings.doorbell_did
+            and int(msg.siid) == int(settings.doorbell_siid)
+            and int(msg.eiid) == int(settings.doorbell_eiid)
+        ):
+            return
         doorbell_listener = getattr(self, "_doorbell_listener", None)
         if doorbell_listener is not None:
             await doorbell_listener.on_event(msg)
 
     async def _on_doorbell_event(self, event: MIoTDeviceEvent) -> None:
-        """Handle doorbell event: start lock camera recording for configured duration.
+        """Handle doorbell event: keep lock camera streaming for configured duration.
 
         This is called by the DoorbellEventListener after debounce settles.
-        It triggers the lock camera to start recording for a configured duration,
+        It triggers the lock camera to stream for a configured duration,
         then automatically disconnects to preserve battery.
         """
         did = event.did
+        duration = get_settings().lock_camera.recording_duration
         logger.info(
-            "Doorbell event triggered for lock %s, starting camera recording",
+            "Doorbell event triggered for lock %s, keeping camera stream alive duration=%ss",
             did,
+            duration,
+        )
+        await self.keep_lock_camera_stream_alive(
+            did,
+            float(duration),
+            "doorbell_event",
         )
 
-        # Cancel any existing recording task for this device
+    async def keep_lock_camera_stream_alive(
+        self, did: str, duration_seconds: float, reason: str
+    ) -> None:
+        """Keep a lock camera stream connected until at least now + duration."""
+        if duration_seconds <= 0:
+            return
+        if did not in self._lock_devices:
+            logger.info(
+                "Lock camera stream hold skipped for %s: not a discovered lock camera reason=%s duration=%.1fs",
+                did,
+                reason,
+                duration_seconds,
+            )
+            return
+
+        now = time.monotonic()
+        deadline = now + duration_seconds
+        old_deadline = self._lock_camera_hold_deadlines.get(did, 0.0)
+        self._lock_camera_hold_deadlines[did] = max(old_deadline, deadline)
+
         existing_task = self._lock_camera_tasks.get(did)
         if existing_task and not existing_task.done():
-            logger.info("Cancelling existing recording task for lock %s", did)
-            existing_task.cancel()
+            logger.info(
+                "Lock camera stream hold extended for %s reason=%s duration=%.1fs old_deadline=%.3f new_deadline=%.3f",
+                did,
+                reason,
+                duration_seconds,
+                old_deadline,
+                self._lock_camera_hold_deadlines[did],
+            )
+            return
 
-        # Start a new recording task
+        logger.info(
+            "Lock camera stream hold started for %s reason=%s duration=%.1fs deadline=%.3f",
+            did,
+            reason,
+            duration_seconds,
+            self._lock_camera_hold_deadlines[did],
+        )
         task = asyncio.create_task(self._lock_camera_recording_session(did))
         self._lock_camera_tasks[did] = task
+
+    def held_lock_camera_dids(self) -> set[str]:
+        """Return lock camera dids whose doorbell stream hold has not expired."""
+        now = time.monotonic()
+        expired = [
+            did
+            for did, deadline in self._lock_camera_hold_deadlines.items()
+            if deadline <= now
+        ]
+        for did in expired:
+            self._lock_camera_hold_deadlines.pop(did, None)
+        return {
+            did
+            for did, deadline in self._lock_camera_hold_deadlines.items()
+            if deadline > now
+        }
 
     async def _lock_camera_recording_session(self, did: str) -> None:
         """Run a lock camera recording session for the configured duration.
@@ -1338,13 +1489,10 @@ class MiotProxy:
         """
         created_handler = False
         try:
-            _settings = get_settings()
-            duration = _settings.lock_camera.recording_duration
-
             logger.info(
-                "Starting lock camera recording for %s, duration=%ds",
+                "Starting lock camera stream hold for %s deadline=%.3f",
                 did,
-                duration,
+                self._lock_camera_hold_deadlines.get(did, 0.0),
             )
 
             # Get the lock device info
@@ -1383,23 +1531,29 @@ class MiotProxy:
                 created_handler = True
                 logger.info("On-demand camera handler created for lock %s", did)
 
-            logger.info(
-                "Lock camera recording in progress for %s, waiting %ds",
-                did,
-                duration,
-            )
-            await asyncio.sleep(duration)
+            while True:
+                deadline = self._lock_camera_hold_deadlines.get(did, 0.0)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                logger.info(
+                    "Lock camera stream hold in progress for %s remaining=%.1fs deadline=%.3f",
+                    did,
+                    remaining,
+                    deadline,
+                )
+                await asyncio.sleep(min(remaining, 5.0))
 
             logger.info(
-                "Lock camera recording completed for %s",
+                "Lock camera stream hold completed for %s",
                 did,
             )
 
         except asyncio.CancelledError:
-            logger.info("Lock camera recording cancelled for %s", did)
+            logger.info("Lock camera stream hold cancelled for %s", did)
         except Exception as e:
             logger.error(
-                "Lock camera recording failed for %s: %s",
+                "Lock camera stream hold failed for %s: %s",
                 did,
                 e,
             )
@@ -1414,6 +1568,7 @@ class MiotProxy:
                     logger.error("Failed to disconnect lock camera %s: %s", did, e)
             # Clean up the task reference
             self._lock_camera_tasks.pop(did, None)
+            self._lock_camera_hold_deadlines.pop(did, None)
 
     def _collect_home_ids(self) -> set[str]:
         """Union of home_ids across cached devices / cameras / scenes.

@@ -6,25 +6,102 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from miloco.config import get_settings
+from miloco.doorbell.debug_audio import doorbell_debug_audio_recorder
 from miloco.utils.agent_client import call_agent_webhook, run_agent_turn_detailed
+from miloco.utils.paths import miloco_home
 
 if TYPE_CHECKING:
     from miloco.perception.types import Speech
 
 logger = logging.getLogger(__name__)
 
+TZ_SHANGHAI = timezone(timedelta(hours=8))
+
 DOORBELL_INTERCOM_PROMPT = (
-    "你正在通过智能门锁和门外访客对话。门铃响起时，请先简短询问对方身份和来意。"
+    "你正在通过智能门锁和门外访客对话。门铃响起时，首轮必须先主动询问：你好，你是谁？有什么事情吗？"
     "后续每次收到“门外访客说：...”时，请继续用简短中文回复，适合直接转成音频播放给门外访客。"
-    "不要输出 Markdown、列表或很长的解释。"
+    "最终回复只能是要通过门锁播报给访客的话。不要描述你的处理过程，不要说“已回复/已询问/已通知/正在处理”，"
+    "不要总结访客说了什么，不要向主人汇报门铃状态，不要输出思考过程、Markdown、列表或很长的解释。"
 )
+
+
+def _default_doorman_tasks_dirs() -> list[Path]:
+    configured = os.environ.get("MILOCO_DOORMAN_TASKS_DIR")
+    if configured:
+        return [Path(configured).expanduser()]
+    home = Path.home()
+    return [
+        home / ".openclaw" / "workspace" / "doorman" / "data" / "tasks",
+        home / ".openclaw" / "workspace" / "agents" / "doorman" / "data" / "tasks",
+    ]
+
+
+def _parse_task_expiry(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=TZ_SHANGHAI)
+    return parsed
+
+
+def _load_active_doorman_tasks(now: datetime | None = None) -> list[dict[str, object]]:
+    current = now or datetime.now(TZ_SHANGHAI)
+    tasks: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    for tasks_dir in _default_doorman_tasks_dirs():
+        if not tasks_dir.is_dir():
+            continue
+        for task_file in sorted(tasks_dir.glob("*.json")):
+            try:
+                task = json.loads(task_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                logger.warning("doorman task ignored: unreadable file=%s", task_file)
+                continue
+            if not isinstance(task, dict) or task.get("status") != "active":
+                continue
+            expires_at = _parse_task_expiry(task.get("expires_at"))
+            if expires_at is not None and current > expires_at:
+                continue
+            task_id = str(task.get("task_id") or task_file)
+            if task_id in seen_ids:
+                continue
+            seen_ids.add(task_id)
+            tasks.append(task)
+    tasks.sort(key=lambda task: str(task.get("created_at", "")), reverse=True)
+    return tasks
+
+
+def _format_doorman_tasks_prompt(tasks: list[dict[str, object]]) -> str:
+    if not tasks:
+        return ""
+    lines = ["\n\n当前有效门房任务："]
+    for index, task in enumerate(tasks[:5], start=1):
+        task_type = str(task.get("type") or "general_instruction")
+        content = str(task.get("content") or "").strip()
+        expires_at = str(task.get("expires_at") or "").strip()
+        if not content:
+            continue
+        suffix = f"；有效期至 {expires_at}" if expires_at else ""
+        lines.append(f"{index}. [{task_type}] {content}{suffix}")
+    if len(lines) == 1:
+        return ""
+    lines.append("只能在访客来意匹配时转达相关任务内容；不要透露未匹配任务或家庭隐私。")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -49,10 +126,17 @@ class DoorbellConversationService:
         *,
         clock: Callable[[], float] | None = None,
         schedule_timeouts: bool = True,
+        keep_stream_alive: Callable[[str, float, str], Awaitable[None] | None] | None = None,
     ) -> None:
         self._clock = clock or time.monotonic
         self._schedule_timeouts = schedule_timeouts
         self._active: dict[str, _Conversation] = {}
+        self._keep_stream_alive = keep_stream_alive
+
+    def set_keep_stream_alive(
+        self, callback: Callable[[str, float, str], Awaitable[None] | None] | None
+    ) -> None:
+        self._keep_stream_alive = callback
 
     async def start(
         self,
@@ -73,6 +157,19 @@ class DoorbellConversationService:
                 bool(miot.doorbell_session_key),
             )
             return None
+        existing = self._find_active_conversation_for_did(did)
+        if existing is not None:
+            logger.warning(
+                "doorbell conversation start ignored: active conversation exists did=%s existing_id=%s state=%s turns=%s siid=%s eiid=%s text=%s",
+                did,
+                existing.conversation_id,
+                existing.state,
+                existing.visitor_turns,
+                siid,
+                eiid,
+                text,
+            )
+            return existing.conversation_id
         conversation_id = str(uuid.uuid4())
         conversation = _Conversation(
             conversation_id=conversation_id,
@@ -82,6 +179,7 @@ class DoorbellConversationService:
             speech_source_dids=set(speech_source_dids or {did}) | {did},
         )
         self._active[conversation_id] = conversation
+        self._start_debug_audio_recording(conversation)
         logger.info(
             "doorbell conversation started id=%s did=%s siid=%s eiid=%s speech_source_dids=%s text=%s",
             conversation_id,
@@ -101,6 +199,12 @@ class DoorbellConversationService:
             and conversation.state == "listening"
             and self._clock() <= conversation.listen_deadline
         )
+
+    def _find_active_conversation_for_did(self, did: str) -> _Conversation | None:
+        for conversation in self._active.values():
+            if conversation.did == did and conversation.state != "ended":
+                return conversation
+        return None
 
     def on_reply_audio_result(
         self, conversation_id: str, *, success: bool, error: str | None = None
@@ -125,6 +229,7 @@ class DoorbellConversationService:
             conversation.visitor_turns,
         )
         if not success:
+            self._stop_debug_audio_recording(conversation, reason="playback_failed")
             conversation.state = "ended"
             self._active.pop(conversation_id, None)
             logger.warning(
@@ -135,6 +240,7 @@ class DoorbellConversationService:
             )
             return True
         if conversation.visitor_turns >= get_settings().miot.doorbell_max_turns:
+            self._stop_debug_audio_recording(conversation, reason="max_turns")
             conversation.state = "ended"
             self._active.pop(conversation_id, None)
             logger.info(
@@ -159,6 +265,7 @@ class DoorbellConversationService:
             sorted(conversation.speech_source_dids),
         )
         self._schedule_listen_timeout(conversation)
+        self._request_stream_hold(conversation, reason="reply_audio_success")
         return True
 
     async def expire_listening_windows(self) -> int:
@@ -177,6 +284,61 @@ class DoorbellConversationService:
             )
             await self._end_after_silence(conversation)
         return expired
+
+    def observe_audio_activity(
+        self,
+        *,
+        source_dids: set[str],
+        speech_probability: float,
+        audio_energy: float,
+        reason: str,
+    ) -> int:
+        settings = get_settings().miot
+        extend_seconds = settings.doorbell_audio_activity_extend_seconds
+        if extend_seconds <= 0:
+            return 0
+        if (
+            speech_probability < settings.doorbell_audio_activity_min_speech_probability
+            and audio_energy < settings.doorbell_audio_activity_min_energy
+        ):
+            return 0
+        now = self._clock()
+        extended = 0
+        for conversation in list(self._active.values()):
+            if conversation.state != "listening":
+                continue
+            if not (conversation.speech_source_dids & source_dids):
+                continue
+            new_deadline = max(conversation.listen_deadline, now + extend_seconds)
+            if new_deadline <= conversation.listen_deadline:
+                logger.info(
+                    "doorbell audio activity observed without extension id=%s did=%s source_dids=%s speech_probability=%.3f audio_energy=%.3f deadline=%.3f reason=%s",
+                    conversation.conversation_id,
+                    conversation.did,
+                    sorted(source_dids),
+                    speech_probability,
+                    audio_energy,
+                    conversation.listen_deadline,
+                    reason,
+                )
+                continue
+            conversation.listen_deadline = new_deadline
+            conversation.listen_generation += 1
+            extended += 1
+            logger.info(
+                "doorbell audio activity extended listening id=%s did=%s source_dids=%s speech_probability=%.3f audio_energy=%.3f generation=%s deadline=%.3f reason=%s",
+                conversation.conversation_id,
+                conversation.did,
+                sorted(source_dids),
+                speech_probability,
+                audio_energy,
+                conversation.listen_generation,
+                conversation.listen_deadline,
+                reason,
+            )
+            self._schedule_listen_timeout(conversation)
+            self._request_stream_hold(conversation, reason="audio_activity")
+        return extended
 
     async def accept_speech(self, speech: Speech) -> bool:
         conversation = self._find_listening_conversation(speech)
@@ -254,6 +416,7 @@ class DoorbellConversationService:
                 )
                 conversation.state = "ended"
                 self._active.pop(conversation.conversation_id, None)
+                self._stop_debug_audio_recording(conversation, reason="listen_expired")
                 continue
             if conversation.speech_source_dids & source_dids:
                 return conversation
@@ -305,8 +468,38 @@ class DoorbellConversationService:
                 conversation.conversation_id,
             )
 
+    def _request_stream_hold(self, conversation: _Conversation, *, reason: str) -> None:
+        if self._keep_stream_alive is None:
+            return
+        duration = max(0.0, conversation.listen_deadline - self._clock())
+        if duration <= 0:
+            return
+        for source_did in sorted(conversation.speech_source_dids):
+            try:
+                loop = asyncio.get_running_loop()
+                result = self._keep_stream_alive(source_did, duration, reason)
+                if result is not None:
+                    loop.create_task(result)
+            except RuntimeError:
+                logger.debug(
+                    "doorbell stream hold not scheduled outside running loop id=%s did=%s reason=%s",
+                    conversation.conversation_id,
+                    source_did,
+                    reason,
+                )
+            except Exception as e:
+                logger.warning(
+                    "doorbell stream hold request failed id=%s did=%s duration=%.3f reason=%s error=%s",
+                    conversation.conversation_id,
+                    source_did,
+                    duration,
+                    reason,
+                    e,
+                )
+
     async def _end_after_silence(self, conversation: _Conversation) -> None:
         self._active.pop(conversation.conversation_id, None)
+        self._stop_debug_audio_recording(conversation, reason="silence_timeout")
         conversation.state = "ended"
         conversation.listen_generation += 1
         logger.info(
@@ -373,7 +566,8 @@ class DoorbellConversationService:
             trace_id=trace_id,
             wait_timeout_ms=settings.dispatcher.turn_wait_timeout_ms,
             extra_payload={
-                "extraSystemPrompt": DOORBELL_INTERCOM_PROMPT,
+                "extraSystemPrompt": DOORBELL_INTERCOM_PROMPT
+                + _format_doorman_tasks_prompt(_load_active_doorman_tasks()),
                 "doorbellReplyAudio": self._audio_payload(conversation),
             },
         )
@@ -421,6 +615,36 @@ class DoorbellConversationService:
         if include_conversation_id:
             payload["conversationId"] = conversation.conversation_id
         return payload
+
+    @staticmethod
+    def _start_debug_audio_recording(conversation: _Conversation) -> None:
+        miot = get_settings().miot
+        if not miot.doorbell_debug_audio_enabled:
+            return
+        target_dir = (
+            Path(miot.doorbell_debug_audio_dir).expanduser()
+            if miot.doorbell_debug_audio_dir
+            else miloco_home() / "debug" / "doorbell-audio"
+        )
+        try:
+            for source_did in sorted(conversation.speech_source_dids):
+                doorbell_debug_audio_recorder.start(
+                    source_did,
+                    conversation.conversation_id,
+                    target_dir,
+                )
+        except Exception as e:
+            logger.warning(
+                "doorbell debug audio recording failed to start id=%s did=%s error=%s",
+                conversation.conversation_id,
+                conversation.did,
+                e,
+            )
+
+    @staticmethod
+    def _stop_debug_audio_recording(conversation: _Conversation, *, reason: str) -> None:
+        for source_did in sorted(conversation.speech_source_dids):
+            doorbell_debug_audio_recorder.stop(source_did, reason=reason)
 
 
 _service = DoorbellConversationService()

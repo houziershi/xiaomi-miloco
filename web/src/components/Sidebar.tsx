@@ -26,12 +26,14 @@ import {
   IconTasks,
   IconActivity,
   IconUsage,
+  IconDoorman,
 } from "@/lib/navIcons";
 
 export type TabKey =
   | "now"
   | "devices"
   | "family"
+  | "doorman"
   | "tasks"
   | "activity"
   | "usage";
@@ -76,6 +78,12 @@ export const TABS: TabDef[] = [
     labelKey: "nav.family",
     hintKey: "nav.familyHint",
     Icon: IconFamily,
+  },
+  {
+    key: "doorman",
+    labelKey: "nav.doorman",
+    hintKey: "nav.doormanHint",
+    Icon: IconDoorman,
   },
   {
     key: "tasks",

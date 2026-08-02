@@ -139,6 +139,9 @@ def test_doorlock_yaml_documents_and_loads_defaults() -> None:
         "doorbell_reply_audio_command",
         "doorbell_conversation_enabled",
         "doorbell_visitor_listen_seconds",
+        "doorbell_audio_activity_extend_seconds",
+        "doorbell_audio_activity_min_speech_probability",
+        "doorbell_audio_activity_min_energy",
         "doorbell_max_turns",
         "doorbell_visitor_message_prefix",
         "doorbell_silence_fallback_enabled",
@@ -156,6 +159,9 @@ def test_doorlock_yaml_documents_and_loads_defaults() -> None:
     assert data["miot"]["doorbell_reply_audio_command"] is None
     assert data["miot"]["doorbell_conversation_enabled"] is True
     assert data["miot"]["doorbell_visitor_listen_seconds"] == 15.0
+    assert data["miot"]["doorbell_audio_activity_extend_seconds"] == 15.0
+    assert data["miot"]["doorbell_audio_activity_min_speech_probability"] == 0.5
+    assert data["miot"]["doorbell_audio_activity_min_energy"] == 0.1
     assert data["miot"]["doorbell_max_turns"] == 3
     assert data["miot"]["doorbell_visitor_message_prefix"] == "门外访客说："
     assert data["miot"]["doorbell_silence_fallback_enabled"] is True

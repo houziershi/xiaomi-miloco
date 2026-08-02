@@ -7,6 +7,8 @@
     "devicesHint": "管理米家设备",
     "family": "家庭",
     "familyHint": "管理家庭成员",
+    "doorman": "门房",
+    "doormanHint": "主 Agent 与司阍",
     "tasks": "任务",
     "tasksHint": "管理家庭任务",
     "activity": "日志",

@@ -167,6 +167,46 @@ export const IconDevices = ({ active, ...p }: Props) =>
     </svg>
   );
 
+/** 门房 — 门 + 对讲气泡 */
+export const IconDoorman = ({ active, ...p }: Props) =>
+  active ? (
+    <svg {...baseSvg(p)}>
+      <path
+        d="M10 6H30V42H10V6Z"
+        fill="currentColor"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M30 14H40V30H35L30 35V14Z"
+        fill="currentColor"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinejoin="round"
+      />
+      <path d="M24 24H24.02" stroke="#fff" strokeWidth="5" strokeLinecap="round" />
+      <path d="M35 20H35.02" stroke="#fff" strokeWidth="4" strokeLinecap="round" />
+    </svg>
+  ) : (
+    <svg {...baseSvg(p)}>
+      <path
+        d="M10 6H30V42H10V6Z"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M30 14H40V30H35L30 35V14Z"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinejoin="round"
+      />
+      <path d="M24 24H24.02" stroke="currentColor" strokeWidth="5" strokeLinecap="round" />
+      <path d="M35 20H35.02" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+    </svg>
+  );
+
 /** 家人 — 双人 */
 export const IconFamily = ({ active, ...p }: Props) =>
   active ? (

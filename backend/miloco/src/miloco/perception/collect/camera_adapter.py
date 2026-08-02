@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Callable
 from miot.types import MIoTCameraInfo
 
 from miloco.config import get_settings
+from miloco.doorbell.debug_audio import doorbell_debug_audio_recorder
 from miloco.miot.client import MiotProxy
 from miloco.miot.schema import CameraInfo
 from miloco.node_monitor import NodeName, get_monitor
@@ -159,7 +160,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         只数通过 home filter + 未拉黑的相机的流路数）。
         ``cap=False`` 用于「列全集」语义（如 rule target 校验），不受投喂上限影响。
         """
-        from miloco.miot.filter import select_active_camera_dids
+        from miloco.miot.filter import select_active_camera_dids, synthetic_camera_did
 
         kv = self._miot_proxy._kv_repo
         # 选择口径与 refresh_cameras 的 manager 建销共用同一函数，避免投喂集与拉流集
@@ -177,6 +178,22 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             cap=cap,
             awake_map=getattr(self._miot_proxy, "_camera_awake_cache", None),
         )
+        held = self._miot_proxy.held_lock_camera_dids()
+        if held:
+            active = list(active)
+            for physical_did in sorted(held):
+                camera = cams.get(physical_did)
+                if camera is None:
+                    continue
+                channel_count = getattr(camera, "channel_count", None) or 1
+                syn_did = synthetic_camera_did(physical_did, 0, channel_count)
+                if syn_did not in active:
+                    active.append(syn_did)
+            logger.info(
+                "Camera discover includes doorbell-held locks: held=%s active=%s",
+                sorted(held),
+                sorted(active),
+            )
         # ``select_active_camera_dids`` 已按通道展开、返回**合成 did**（单摄裸 did、多摄
         # ``{did}:ch{n}``），并已做过 per-channel 黑名单 / per-lens 镜头门 / 上限截断。这里
         # 只需按合成 did 建 PerceptionDevice;相机元数据按物理 did 从 cams 取。
@@ -587,6 +604,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     decoded_unix_ms=decoded_unix_ms,
                     decode_latency_ms=decode_latency_ms,
                 )
+                doorbell_debug_audio_recorder.append(did, frame)
                 state.sync_buffer.put(
                     "decoded_audio", decoded, stream_ts=ts, wall_ms=wall_ms
                 )

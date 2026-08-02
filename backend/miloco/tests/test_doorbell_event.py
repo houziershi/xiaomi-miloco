@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from miloco.config import reset_settings
@@ -35,6 +36,9 @@ def _bare_proxy() -> MiotProxy:
     proxy._miot_client.sub_legacy_device_event_async = AsyncMock()
     proxy._miot_client.sub_device_event_async = AsyncMock()
     proxy._subscribed_doorbell_event = None
+    proxy._doorbell_subscription_retry_task = None
+    proxy._lock_camera_tasks = {}
+    proxy._lock_camera_hold_deadlines = {}
     proxy._device_info_dict = {
         "door-did": SimpleNamespace(name="智能门锁", room_name="玄关")
     }
@@ -63,6 +67,57 @@ async def test_sync_doorbell_subscription_force_retries_existing_target():
 
     proxy._miot_client.sub_device_events_async.assert_awaited_once_with("door-did")
     assert proxy._subscribed_doorbell_event == ("door-did", 7, 1006)
+
+
+@pytest.mark.asyncio
+async def test_sync_doorbell_subscription_schedules_retry_on_failure():
+    proxy = _bare_proxy()
+    proxy._miot_client.sub_device_events_async.side_effect = RuntimeError("Not authorized")
+    schedule_retry = MagicMock()
+    proxy._schedule_doorbell_subscription_retry = schedule_retry
+
+    await proxy._sync_doorbell_subscription()
+
+    schedule_retry.assert_called_once_with(("door-did", 7, 1006))
+    assert proxy._subscribed_doorbell_event is None
+
+
+@pytest.mark.asyncio
+async def test_keep_lock_camera_stream_alive_extends_existing_task(monkeypatch):
+    proxy = _bare_proxy()
+    proxy._lock_devices = {"door-did": {}}
+    release = asyncio.Event()
+    starts = 0
+
+    async def fake_session(did: str) -> None:
+        nonlocal starts
+        starts += 1
+        await release.wait()
+
+    monkeypatch.setattr(proxy, "_lock_camera_recording_session", fake_session)
+
+    await proxy.keep_lock_camera_stream_alive("door-did", 10.0, "doorbell_event")
+    first_deadline = proxy._lock_camera_hold_deadlines["door-did"]
+    await proxy.keep_lock_camera_stream_alive("door-did", 30.0, "reply_audio_success")
+    second_deadline = proxy._lock_camera_hold_deadlines["door-did"]
+    await asyncio.sleep(0)
+
+    assert starts == 1
+    assert second_deadline > first_deadline
+    release.set()
+    await proxy._lock_camera_tasks["door-did"]
+
+
+def test_held_lock_camera_dids_returns_unexpired_and_cleans_expired(monkeypatch):
+    proxy = _bare_proxy()
+    monkeypatch.setattr(client_module.time, "monotonic", lambda: 100.0)
+    proxy._lock_camera_hold_deadlines = {
+        "expired-did": 99.0,
+        "door-did": 101.0,
+    }
+
+    assert proxy.held_lock_camera_dids() == {"door-did"}
+    assert proxy._lock_camera_hold_deadlines == {"door-did": 101.0}
 
 
 @pytest.mark.asyncio
@@ -96,7 +151,7 @@ async def test_doorbell_event_dispatches_visible_owner_message(monkeypatch):
 @pytest.mark.asyncio
 async def test_doorbell_event_requests_openclaw_reply_audio(monkeypatch):
     proxy = _bare_proxy()
-    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:main:door")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:doorman:doorbell")
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_WAKE_ACTION_IID", "action.17.3")
     monkeypatch.setenv(
         "MILOCO_MIOT__DOORBELL_REPLY_AUDIO_COMMAND",
@@ -125,13 +180,41 @@ async def test_doorbell_event_requests_openclaw_reply_audio(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_someone_at_door_event_does_not_start_conversation(monkeypatch):
+    proxy = _bare_proxy()
+    proxy._doorbell_listener = SimpleNamespace(on_event=AsyncMock())
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:doorman:doorbell")
+    monkeypatch.setenv(
+        "MILOCO_MIOT__DOORBELL_REPLY_AUDIO_COMMAND", '["/bin/echo", "{text}"]'
+    )
+    reset_settings()
+    run_turn = AsyncMock(return_value=("run-1", "ok", 123.0, "请说"))
+    monkeypatch.setattr(conversation_module, "run_agent_turn_detailed", run_turn)
+
+    await proxy._on_device_event(MIoTDeviceEvent(did="door-did", siid=17, eiid=2))
+
+    run_turn.assert_not_awaited()
+    proxy._doorbell_listener.on_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_doorbell_device_event_does_not_enter_doorbell_listener():
+    proxy = _bare_proxy()
+    proxy._doorbell_listener = SimpleNamespace(on_event=AsyncMock())
+
+    await proxy._on_device_event(MIoTDeviceEvent(did="door-did", siid=24, eiid=1))
+
+    proxy._doorbell_listener.on_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_doorbell_conversation_accepts_same_named_lock_camera_source(monkeypatch):
     proxy = _bare_proxy()
     proxy._camera_info_dict = {
         "door-camera-did": SimpleNamespace(name="智能门锁 2"),
         "other-camera-did": SimpleNamespace(name="其他摄像机"),
     }
-    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:main:door")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:doorman:doorbell")
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_REPLY_AUDIO_COMMAND", '["/bin/echo", "{text}"]')
     reset_settings()
 
@@ -148,7 +231,7 @@ async def test_doorbell_conversation_accepts_same_named_lock_camera_source(monke
 async def test_doorbell_conversation_accepts_configured_speech_source_dids(monkeypatch):
     proxy = _bare_proxy()
     proxy._camera_info_dict = {}
-    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:main:door")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:doorman:doorbell")
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_REPLY_AUDIO_COMMAND", '["/bin/echo", "{text}"]')
     monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SPEECH_SOURCE_DIDS", '["door-camera-did"]')
     reset_settings()

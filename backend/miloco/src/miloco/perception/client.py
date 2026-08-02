@@ -171,6 +171,26 @@ def _filter_completed_event_rules(
     return kept, sorted(skipped)
 
 
+def _observe_doorbell_audio_activity(result: PerceptionBatch) -> None:
+    timing = result.timing or {}
+    service = get_doorbell_conversation_service()
+    for key, value in timing.items():
+        if not key.startswith("_gate_speech_prob_"):
+            continue
+        did = key.removeprefix("_gate_speech_prob_")
+        try:
+            speech_probability = float(value)
+            audio_energy = float(timing.get(f"_gate_audio_energy_{did}", 0.0))
+        except (TypeError, ValueError):
+            continue
+        service.observe_audio_activity(
+            source_dids={did},
+            speech_probability=speech_probability,
+            audio_energy=audio_energy,
+            reason=f"perception_window:{result.time}",
+        )
+
+
 async def _run_with_trace_id(
     trace_id: str | None,
     coro,
@@ -862,6 +882,8 @@ class PerceptionEngineProxy:
                 "suggestion", pending_suggestions, build_suggestions_text,
                 intra_priority=suggestion_intra_priority(pending_suggestions),
             )
+
+        _observe_doorbell_audio_activity(result)
 
         # handle speeches (skip those already sent via streaming early callback)
         doorbell_candidates = _filter_voice_enabled(

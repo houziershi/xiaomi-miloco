@@ -45,6 +45,7 @@ import { ToastHost, toast } from "./components/Toast";
 import { UsagePage } from "./components/UsagePage";
 import type { HomeId } from "./lib/types";
 import { PerfPage } from "./components/PerfPage";
+import { DoormanConsolePage } from "./components/DoormanConsolePage";
 import { IconMoon, IconSun } from "./lib/icons";
 import { useTheme } from "./hooks/useTheme";
 import { useTranslation } from "react-i18next";
@@ -171,7 +172,18 @@ function MainApp() {
   // (原本有 now state + 30s setInterval 给 Sidebar 显示时间，现 Sidebar
   // 已不展示时间；HeroNow 的 cam card 内部各自维护 1min 时钟。)
 
-  const [activeTab, setActiveTab] = useState<TabKey>("now");
+  const [activeTab, setActiveTab] = useState<TabKey>(() =>
+    typeof window !== "undefined" && window.location.hash === "#doorman"
+      ? "doorman"
+      : "now",
+  );
+  useEffect(() => {
+    const handler = () => {
+      if (window.location.hash === "#doorman") setActiveTab("doorman");
+    };
+    window.addEventListener("hashchange", handler);
+    return () => window.removeEventListener("hashchange", handler);
+  }, []);
   // 活动 tab 现为单流(事件 + 动作合并);筛选 checkbox 在 ActivityFeed 内部,不占 App state。
   const [editingPerson, setEditingPerson] = useState<Person | null | undefined>(
     undefined,
@@ -376,6 +388,8 @@ function MainApp() {
           </div>
         );
       }
+      case "doorman":
+        return <DoormanConsolePage />;
       case "tasks":
         if (tasks.error) {
           return (

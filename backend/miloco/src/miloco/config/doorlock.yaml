@@ -31,11 +31,9 @@ miot:
   doorbell_eiid: 1006
 
   # doorbell_session_key
-  #   门铃事件要投递到的 OpenClaw sessionKey。
-  #   例如浏览器 URL：
-  #     http://127.0.0.1:18789/chat?session=agent%3Amain%3Adashboard%3Axxxx
-  #   对应 sessionKey：
-  #     agent:main:dashboard:xxxx
+  #   门铃事件要投递到的 OpenClaw sessionKey。门锁/门铃访客对话应投递给
+  #   司阍(doorman)子 Agent，例如：
+  #     agent:doorman:doorbell
   #   为空时使用 Miloco 默认 owner-channel 路由（由 OpenClaw 解析最近/已绑定通知会话）。
   #   注意：门锁“播放 OpenClaw 回复文本”依赖固定 session 的同步返回；如果这里为空，
   #   仍会投递事件，但不会执行门锁唤醒和回复音频播放。
@@ -77,6 +75,20 @@ miot:
   #   超过窗口未收到 is_complete=true 且来源 did 匹配的语音，本轮会话结束。
   doorbell_visitor_listen_seconds: 15.0
 
+  # doorbell_audio_activity_extend_seconds
+  #   监听窗口内如果门铃来源 DID 检测到明显人声/音频活动，但 ASR 暂时没有产出
+  #   is_complete=true 的转写，则把监听窗口至少向后延长这段时间，避免访客刚说话
+  #   就被静默兜底打断。<=0 表示关闭该延长逻辑。
+  doorbell_audio_activity_extend_seconds: 15.0
+
+  # doorbell_audio_activity_min_speech_probability
+  #   触发监听延长的人声概率阈值，对应感知 timing 中的 _gate_speech_prob_<did>。
+  doorbell_audio_activity_min_speech_probability: 0.5
+
+  # doorbell_audio_activity_min_energy
+  #   触发监听延长的音频能量阈值，对应感知 timing 中的 _gate_audio_energy_<did>。
+  doorbell_audio_activity_min_energy: 0.1
+
   # doorbell_max_turns
   #   单次门铃会话最多接收并转发的访客语音轮数。
   #   例如 3 表示最多转发 3 次“门外访客说：...”，第三次后的 OpenClaw 回复仍会播放，
@@ -99,3 +111,12 @@ miot:
   #   访客静默超时后播放到门锁的固定兜底文案。
   #   默认会在 doorbell_visitor_listen_seconds 超时后播放一次，然后结束会话。
   doorbell_silence_fallback_text: 我没有听到您的声音，请稍后再按门铃。
+
+  # doorbell_debug_audio_enabled
+  #   调试开关：保存门铃会话期间门锁传入的解码音频，便于人工回听 ASR 输入。
+  #   默认关闭，避免长期保存门口音频。
+  doorbell_debug_audio_enabled: false
+
+  # doorbell_debug_audio_dir
+  #   调试音频保存目录；为空时默认写入 $MILOCO_HOME/debug/doorbell-audio。
+  doorbell_debug_audio_dir: ""

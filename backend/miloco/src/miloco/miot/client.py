@@ -58,6 +58,14 @@ from miloco.utils.agent_client import run_agent_turn
 
 logger = logging.getLogger(__name__)
 
+_DOORBELL_IDENTITY_PROVIDER_LABELS = {
+    1: "美团外卖员",
+    2: "饿了么外卖员",
+    3: "京东快递员",
+    4: "顺丰快递员",
+    5: "淘宝闪购配送员",
+}
+
 def _join_device_event_text(items: list[object]) -> str:
     return "\n".join(str(item) for item in items if str(item).strip())
 
@@ -210,6 +218,7 @@ class MiotProxy:
         # Active lock camera recording sessions: did -> asyncio.Task
         self._lock_camera_tasks: dict[str, asyncio.Task] = {}
         self._lock_camera_hold_deadlines: dict[str, float] = {}
+        self._doorbell_identity_last_triggered: dict[tuple[str, int], float] = {}
         get_doorbell_conversation_service().set_keep_stream_alive(
             self.keep_lock_camera_stream_alive
         )
@@ -349,6 +358,7 @@ class MiotProxy:
             task.cancel()
         self._lock_camera_tasks.clear()
         self._lock_camera_hold_deadlines.clear()
+        self._doorbell_identity_last_triggered.clear()
 
         # 2. Destroy all camera_img_managers
         for mgr in self._camera_img_managers.values():
@@ -385,6 +395,7 @@ class MiotProxy:
         self._subscribed_doorbell_event = None
         self._doorbell_subscription_retry_task = None
         self._lock_camera_hold_deadlines = {}
+        self._doorbell_identity_last_triggered = {}
         # Welcome service survives deinit (rebuilt only in __init__), but its
         # dedup window state must reset alongside the other in-memory caches —
         # otherwise a re-bind of the same did within WELCOME_DEDUP_SEC after an
@@ -974,6 +985,8 @@ class MiotProxy:
             msg.did == settings.doorbell_did and actual_event == configured_event
         )
         if not is_doorbell_trigger:
+            if await self._forward_doorbell_identity_event(msg):
+                return
             logger.debug(
                 "ignoring unconfigured device event did=%s siid=%s eiid=%s",
                 msg.did,
@@ -1056,6 +1069,148 @@ class MiotProxy:
             )
             return
         await dispatch_event("device_event", [text], _join_device_event_text)
+
+    async def _forward_doorbell_identity_event(self, msg: MIoTDeviceEvent) -> bool:
+        """Start a proactive doorman conversation from a lock identity event."""
+        settings = get_settings().miot
+        if (
+            not settings.doorbell_identity_trigger_enabled
+            or not settings.doorbell_did
+            or msg.did != settings.doorbell_did
+            or int(msg.siid) != int(settings.doorbell_identity_siid)
+            or int(msg.eiid) != int(settings.doorbell_identity_eiid)
+        ):
+            return False
+        identity_value = self._device_event_argument_value(
+            msg,
+            int(settings.doorbell_identity_provider_piid),
+        )
+        if identity_value is None:
+            logger.info(
+                "doorbell identity event ignored: missing provider did=%s siid=%s eiid=%s provider_piid=%s raw=%r",
+                msg.did,
+                msg.siid,
+                msg.eiid,
+                settings.doorbell_identity_provider_piid,
+                msg.raw,
+            )
+            return True
+        try:
+            provider_value = int(identity_value)
+        except (TypeError, ValueError):
+            logger.info(
+                "doorbell identity event ignored: non-integer provider did=%s value=%r raw=%r",
+                msg.did,
+                identity_value,
+                msg.raw,
+            )
+            return True
+        allowed_values = {int(value) for value in settings.doorbell_identity_trigger_values}
+        provider_label = _DOORBELL_IDENTITY_PROVIDER_LABELS.get(provider_value)
+        if provider_value not in allowed_values or provider_label is None:
+            logger.info(
+                "doorbell identity event ignored: unhandled provider did=%s value=%s allowed=%s raw=%r",
+                msg.did,
+                provider_value,
+                sorted(allowed_values),
+                msg.raw,
+            )
+            return True
+        cooldown_seconds = float(settings.doorbell_identity_cooldown_seconds)
+        cooldown_key = (msg.did, provider_value)
+        now = time.monotonic()
+        last_triggered = self._doorbell_identity_last_triggered.get(cooldown_key)
+        if (
+            cooldown_seconds > 0
+            and last_triggered is not None
+            and now - last_triggered < cooldown_seconds
+        ):
+            logger.info(
+                "doorbell identity event ignored: cooldown did=%s provider=%s label=%s elapsed=%.3fs cooldown=%.3fs",
+                msg.did,
+                provider_value,
+                provider_label,
+                now - last_triggered,
+                cooldown_seconds,
+            )
+            return True
+
+        device = self._device_info_dict.get(msg.did)
+        device_name = getattr(device, "name", None) or msg.did
+        room_name = getattr(device, "room_name", None) or ""
+        text = (
+            f"门锁识别到门外访客身份：{provider_label}。访客未按门铃。"
+            "请主动用一句简短中文对门外访客播报。"
+            "若当前有效门房任务匹配该身份，请直接转达相关任务；"
+            "若没有匹配任务，请询问：您好，请问有什么需要帮忙的？"
+        )
+        if room_name:
+            text += f"门锁位置：{room_name}。"
+        logger.info(
+            "doorbell identity event received did=%s siid=%s eiid=%s provider=%s label=%s device_name=%s room_name=%s conversation_enabled=%s audio_command_configured=%s cooldown=%.3fs",
+            msg.did,
+            msg.siid,
+            msg.eiid,
+            provider_value,
+            provider_label,
+            device_name,
+            room_name,
+            settings.doorbell_conversation_enabled,
+            bool(settings.doorbell_reply_audio_command),
+            cooldown_seconds,
+        )
+        if (
+            settings.doorbell_session_key
+            and settings.doorbell_conversation_enabled
+            and settings.doorbell_reply_audio_command
+        ):
+            speech_source_dids = self._doorbell_speech_source_dids(msg.did, device_name)
+            logger.info(
+                "doorbell identity conversation handoff did=%s provider=%s label=%s session_key=%s speech_source_dids=%s",
+                msg.did,
+                provider_value,
+                provider_label,
+                settings.doorbell_session_key,
+                sorted(speech_source_dids),
+            )
+            conversation_id = await get_doorbell_conversation_service().start(
+                did=msg.did,
+                siid=msg.siid,
+                eiid=msg.eiid,
+                text=text,
+                speech_source_dids=speech_source_dids,
+            )
+            if conversation_id:
+                self._doorbell_identity_last_triggered[cooldown_key] = now
+            return True
+
+        trace_id = str(uuid.uuid4())
+        await run_agent_turn(
+            text,
+            session_key=settings.doorbell_session_key,
+            lane="miloco-interactive",
+            trace_id=trace_id,
+            wait_timeout_ms=get_settings().dispatcher.turn_wait_timeout_ms,
+        )
+        self._doorbell_identity_last_triggered[cooldown_key] = now
+        return True
+
+    @staticmethod
+    def _device_event_argument_value(msg: MIoTDeviceEvent, piid: int) -> object | None:
+        params = msg.raw.get("params") if isinstance(msg.raw, dict) else None
+        arguments = params.get("arguments") if isinstance(params, dict) else None
+        if not isinstance(arguments, list):
+            return None
+        for argument in arguments:
+            if not isinstance(argument, dict):
+                continue
+            try:
+                argument_piid = int(argument.get("piid"))
+            except (TypeError, ValueError):
+                continue
+            if argument_piid == piid:
+                return argument.get("value")
+        return None
 
     def _doorbell_speech_source_dids(self, did: str, device_name: str) -> set[str]:
         """Return camera/source dids that should be treated as this doorbell.

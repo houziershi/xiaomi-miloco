@@ -134,6 +134,12 @@ def test_doorlock_yaml_documents_and_loads_defaults() -> None:
         "doorbell_did",
         "doorbell_siid",
         "doorbell_eiid",
+        "doorbell_identity_trigger_enabled",
+        "doorbell_identity_siid",
+        "doorbell_identity_eiid",
+        "doorbell_identity_provider_piid",
+        "doorbell_identity_trigger_values",
+        "doorbell_identity_cooldown_seconds",
         "doorbell_session_key",
         "doorbell_wake_action_iid",
         "doorbell_wake_before_reply_audio_enabled",
@@ -155,6 +161,12 @@ def test_doorlock_yaml_documents_and_loads_defaults() -> None:
     assert data["miot"]["doorbell_did"] is None
     assert data["miot"]["doorbell_siid"] == 7
     assert data["miot"]["doorbell_eiid"] == 1006
+    assert data["miot"]["doorbell_identity_trigger_enabled"] is False
+    assert data["miot"]["doorbell_identity_siid"] == 17
+    assert data["miot"]["doorbell_identity_eiid"] == 2
+    assert data["miot"]["doorbell_identity_provider_piid"] == 31
+    assert data["miot"]["doorbell_identity_trigger_values"] == [1, 2, 3, 4, 5]
+    assert data["miot"]["doorbell_identity_cooldown_seconds"] == 120.0
     assert data["miot"]["doorbell_session_key"] is None
     assert data["miot"]["doorbell_wake_action_iid"] == "action.17.3"
     assert data["miot"]["doorbell_wake_before_reply_audio_enabled"] is False

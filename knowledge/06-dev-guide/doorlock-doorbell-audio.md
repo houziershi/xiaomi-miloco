@@ -3,12 +3,12 @@
 本文档说明如何在一台新的本地设备上跑通这条链路：
 
 ```text
-门锁门铃事件 → Miloco 后端 → 司阍 OpenClaw 会话 → OpenClaw 回复文本
+门锁门铃事件 / 门锁访客身份识别事件 → Miloco 后端 → 司阍 OpenClaw 会话 → OpenClaw 回复文本
 → OpenClaw 插件按配置可选唤醒门锁 → OpenClaw 侧生成/转换音频 → audio_sender 发送到门锁播放
 → 播放成功回调 Miloco → Miloco 监听门外访客语音 → 转写继续进入同一 OpenClaw 会话
 ```
 
-职责边界：Miloco 识别 MIoT 门铃事件、维护本次门铃会话状态、接收播放结果回调并转发访客语音；OpenClaw 负责拿到回复文本后按配置可选执行唤醒，并执行 TTS、PCM 转码和门锁音频发送。
+职责边界：Miloco 识别 MIoT 门铃事件和门锁访客身份识别事件、维护本次门口会话状态、接收播放结果回调并转发访客语音；OpenClaw 负责拿到回复文本后按配置可选执行唤醒，并执行 TTS、PCM 转码和门锁音频发送。
 
 ## 当前交互流程
 
@@ -31,6 +31,15 @@
 12. 每轮播放成功后继续进入下一轮访客拾音，直到达到 `doorbell_max_turns`、播放失败，或静默超时。
 13. 如果访客一直不说话，Miloco 不再请求 OpenClaw 生成回复，而是直接播放 `doorbell_silence_fallback_text` 并结束本次会话。
 
+可选的“访客未按门铃”主动触发链路如下：
+
+1. 门锁摄像头主动识别到门外访客身份，上报 `doorbell_identity_siid` / `doorbell_identity_eiid` 事件。
+2. Miloco 从事件 `arguments` 中读取 `doorbell_identity_provider_piid`，当前值定义为：`0=未知`、`1=美团`、`2=饿了么`、`3=京东`、`4=顺丰`、`5=淘宝闪购`。
+3. 只有 value 在 `doorbell_identity_trigger_values` 中才触发；默认 `[1,2,3,4,5]`，忽略 `0` 未知。
+4. Miloco 创建同一个司阍门口会话，首条消息形如：`门锁识别到门外访客身份：京东快递员。访客未按门铃。...`。
+5. OpenClaw 如果匹配到当前有效门房任务，直接播报任务内容；没有匹配任务时主动问候：`您好，请问有什么需要帮忙的？`。
+6. 后续播放、监听访客语音、继续回复、结束语停止都复用门铃会话链路。
+
 本地人工验证过的稳定行为：按一次门铃只创建一个 `conversation_id`；门锁每次播报完成后才进入访客拾音；访客说完后，转写以 `门外访客说：...` 继续进入同一个 `agent:doorman:doorbell` 会话；OpenClaw 的下一条回复会再次播放到门锁。本机验证的门锁不需要显式唤醒，因此 `doorbell_wake_before_reply_audio_enabled` 默认关闭；只有确认某款门锁必须唤醒才能播放音频时再打开。人工测试通过后再提交/推送代码，避免把未验证的门锁交互逻辑合入远程分支。
 
 重要触发过滤规则：Miloco 订阅的是 `device/<doorbell_did>/up/event_occured/#`，但只有 `doorbell_siid` / `doorbell_eiid` 精确匹配的事件会启动门铃会话。门锁还会在靠近、唤醒、播放音频、智能场景等情况下上报其它事件，例如当前设备上观察到的 `siid=17 eiid=2`、`siid=24 eiid=1`。这些事件不能当作门铃触发，否则会出现“没有按门铃也触发”或“播放自己的回复又被当成访客输入”的循环。
@@ -49,7 +58,9 @@
 - `doorbell speech accepted ...`：访客语音已进入同一个门铃会话。
 - `doorbell speech ignored ...`：访客语音未进入门铃会话，日志里会给出原因，例如未监听、超时、重复或来源 DID 不匹配。
 - `doorbell conversation silence timeout ...`：访客静默超时，准备走固定兜底音频。
-- `mips device event received ... siid=17 eiid=2` 但没有 `doorbell event received ... siid=17 eiid=2`：这是正确行为，表示该事件被记录但未被当作门铃触发。
+- `doorbell identity event received ... provider=3 label=京东快递员`：收到并匹配到门锁访客身份识别事件，准备主动开启司阍会话。
+- `doorbell identity event ignored ...`：身份识别事件被忽略，日志里会给出原因，例如未启用、未知身份、缺少 `piid=31`、冷却期内重复等。
+- `mips device event received ... siid=17 eiid=2` 但没有 `doorbell event received ... siid=17 eiid=2`：这是正确行为，表示该事件没有被当作门铃按钮触发；如果启用了身份识别主动触发，应另外查看 `doorbell identity event ...` 日志。
 
 ## 1. 前置条件
 
@@ -217,6 +228,11 @@ Miloco 会把这些值传给 OpenClaw 插件；OpenClaw 插件默认直接执行
 
 双向对话相关配置：
 
+- `doorbell_identity_trigger_enabled`：是否启用门锁访客身份识别主动触发，默认 `false`。开启后，访客未按门铃但门锁识别到明确快递/外卖身份时，也会主动创建司阍会话并播放第一句话。
+- `doorbell_identity_siid` / `doorbell_identity_eiid`：身份识别事件三元组，当前 5 Max 验证为 `17/2`。
+- `doorbell_identity_provider_piid`：身份识别事件参数 piid，当前为 `31`。
+- `doorbell_identity_trigger_values`：允许主动触发的身份值，默认 `[1,2,3,4,5]`，含义为美团、饿了么、京东、顺丰、淘宝闪购；`0` 未知默认忽略。
+- `doorbell_identity_cooldown_seconds`：同一门锁同一身份重复主动触发的冷却时间，默认 `120.0` 秒，避免靠近/播放/重连等事件循环。
 - `doorbell_conversation_enabled`：是否启用门铃双向语音对话，默认 `true`。关闭后只做单次门铃消息和回复播放，不监听访客语音。
 - `doorbell_wake_before_reply_audio_enabled`：播放门锁回复音频前是否先执行 `doorbell_wake_action_iid` 唤醒门锁，默认 `false`。当前验证门锁不需要显式唤醒即可播放；其它门锁如必须唤醒才能播放，再设置为 `true`。
 - `doorbell_speech_source_dids`：门铃会话额外接受的访客语音来源 DID 列表，默认 `[]`。当门铃事件 DID 和实际拾音摄像头 DID 不一致时填写，例如门铃事件来自锁 DID、语音识别来自同一门锁的第二路摄像头 DID。Miloco 仍会自动加入 `doorbell_did`，并尝试按同名/数字后缀自动发现同门锁摄像头；这个配置是显式兜底。
@@ -235,6 +251,12 @@ Miloco 会把这些值传给 OpenClaw 插件；OpenClaw 插件默认直接执行
     "doorbell_did": "<did>",
     "doorbell_siid": 7,
     "doorbell_eiid": 1006,
+    "doorbell_identity_trigger_enabled": true,
+    "doorbell_identity_siid": 17,
+    "doorbell_identity_eiid": 2,
+    "doorbell_identity_provider_piid": 31,
+    "doorbell_identity_trigger_values": [1, 2, 3, 4, 5],
+    "doorbell_identity_cooldown_seconds": 120.0,
     "doorbell_session_key": "agent:doorman:doorbell",
     "doorbell_wake_action_iid": "action.17.3",
     "doorbell_wake_before_reply_audio_enabled": false,
@@ -352,13 +374,14 @@ miloco-cli config show | rg 'doorbell_(did|siid|eiid|session_key|wake_action_iid
 2. **访客语音链路**：按门铃，听完首轮回复后再说一句完整语音。确认目标会话出现 `门外访客说：...`，且门锁播放 OpenClaw 二轮回复。
 3. **来源 DID 链路**：如果语音没有进入门铃会话，先不要改 OpenClaw，查看 Miloco 日志中的 `doorbell speech ignored`。如果原因是 `source did mismatch`，把日志里的实际 `source_dids` 写入 `doorbell_speech_source_dids`，重启后再测。
 4. **防循环链路**：不按门铃，只等待或手动触发一次门锁唤醒/音频播放。确认不会出现新的 `doorbell conversation started`。如果出现，说明某个非门铃事件被配置成了触发三元组，需要重新回到第 2 节确认真实门铃事件。
+5. **身份识别主动触发链路**：开启 `doorbell_identity_trigger_enabled=true` 后，不按门铃，让门锁识别明确身份（例如京东/顺丰）。确认日志出现 `doorbell identity event received ... label=...`，目标会话收到“访客未按门铃”的首条消息，并且门锁主动播放第一句话。没有匹配门房任务时应播放“您好，请问有什么需要帮忙的？”；匹配到任务时可直接播报相关任务。
 
 排查命令：
 
 ```bash
 # Miloco 后端是否收到门铃事件、创建会话、进入监听、接收访客语音
 tail -n 500 ~/.openclaw/miloco/log/miloco-backend.log \
-  | rg 'doorbell event received|doorbell speech source dids resolved|doorbell conversation handoff|doorbell conversation started|doorbell audio callback received|doorbell conversation listening|doorbell .*speech .*candidates|doorbell speech accepted|doorbell speech ignored|doorbell conversation silence timeout|<did>'
+  | rg 'doorbell event received|doorbell identity event received|doorbell identity event ignored|doorbell speech source dids resolved|doorbell conversation handoff|doorbell identity conversation handoff|doorbell conversation started|doorbell audio callback received|doorbell conversation listening|doorbell .*speech .*candidates|doorbell speech accepted|doorbell speech ignored|doorbell conversation silence timeout|<did>'
 
 # OpenClaw 是否执行音频链路；wakeBeforeAudio=false 时应看到 wake skipped
 tail -n 500 /tmp/openclaw/openclaw-$(date +%F).log | rg 'doorbell-reply-audio|wake skipped|audio_sender|edge-tts|ffmpeg|miloco-cli|<did>'
@@ -376,6 +399,7 @@ miloco-cli scope camera list | rg '<did>|voice_in_use'
 - `ModuleNotFoundError: No module named 'edge_tts'`：音频脚本用错 Python，改成装有 `edge_tts` 的绝对路径。
 - `audio command failed`：单独运行 `doorbell_reply_audio.sh '测试'`，先把脚本跑通。
 - 没收到门铃事件：先确认有 `mips_cloud subscribed device events topic=device/<did>/up/event_occured/#`；再按日志确认 `doorbell_did`、`doorbell_siid`、`doorbell_eiid`。
+- 身份识别没有主动播报：确认 `doorbell_identity_trigger_enabled=true`，事件是 `doorbell_identity_siid/doorbell_identity_eiid`，且 `arguments` 中有 `piid=31`、`value` 在 `doorbell_identity_trigger_values` 内；如果日志显示 cooldown，等待 `doorbell_identity_cooldown_seconds` 后再测。
 - 按一次门铃出现两次首问：先看是否有两个不同 `conversation_id`。如果有，通常是门锁上报了多种事件但被错误都当成门铃；只保留真实门铃三元组，例如当前设备的 `7/1006`。如果只有一个 `conversation_id` 但多次回复，通常是门锁播报音频被麦克风/ASR 当作访客语音，需要根据 `doorbell speech accepted content=...` 判断是否为回声文本，并调小门锁音量、增大播放后再说话间隔，或进一步实现回声抑制。
 - 有回复但无声音：确认 OpenClaw 日志里音频命令没有失败，确认门锁 IP/端口可达；如果该门锁必须唤醒才能播放，设置 `doorbell_wake_before_reply_audio_enabled=true` 并确认唤醒 action 没有失败。
 - 有第一次播放但访客说话没进会话：确认播放成功回调日志、门锁拾音开关、`doorbell_visitor_listen_seconds` 窗口、语音识别结果是否 `is_complete=true`，以及 `doorbell_speech_source_dids` 是否覆盖实际 `source_device_ids`。

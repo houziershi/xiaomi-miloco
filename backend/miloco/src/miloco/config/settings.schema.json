@@ -141,6 +141,37 @@
           "default": 1006,
           "description": "门铃事件 eiid"
         },
+        "doorbell_identity_trigger_enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "是否启用门锁访客身份识别主动触发；启用后可在访客未按门铃时主动播报"
+        },
+        "doorbell_identity_siid": {
+          "type": "integer",
+          "default": 17,
+          "description": "门锁访客身份识别事件 siid"
+        },
+        "doorbell_identity_eiid": {
+          "type": "integer",
+          "default": 2,
+          "description": "门锁访客身份识别事件 eiid"
+        },
+        "doorbell_identity_provider_piid": {
+          "type": "integer",
+          "default": 31,
+          "description": "门锁访客身份识别事件中表示访客身份的参数 piid"
+        },
+        "doorbell_identity_trigger_values": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "default": [1, 2, 3, 4, 5],
+          "description": "允许主动触发门口会话的访客身份 value；0 表示未知，默认不触发"
+        },
+        "doorbell_identity_cooldown_seconds": {
+          "type": "number",
+          "default": 120.0,
+          "description": "同一门锁同一访客身份主动触发后的冷却时间（秒）；<=0 表示关闭冷却"
+        },
         "doorbell_session_key": {
           "anyOf": [{ "type": "string" }, { "type": "null" }],
           "default": null,

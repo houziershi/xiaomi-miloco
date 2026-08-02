@@ -30,6 +30,33 @@ miot:
   #   当前已验证的小米智能门锁 5 Max 内外双摄门铃事件为 eiid=1006。
   doorbell_eiid: 1006
 
+  # doorbell_identity_trigger_enabled
+  #   是否启用门锁访客身份识别主动触发。
+  #   true 时：门锁上报明确访客身份（例如京东/顺丰快递员、美团/饿了么外卖员）后，
+  #   即使访客未按门铃，也会主动进入司阍会话并播放第一句话。
+  #   默认 false，避免未验证门锁误触发门口播报。
+  doorbell_identity_trigger_enabled: false
+
+  # doorbell_identity_siid / doorbell_identity_eiid
+  #   门锁访客身份识别事件的 siid/eiid。
+  #   当前小米智能门锁 5 Max 内外双摄验证为 siid=17、eiid=2。
+  doorbell_identity_siid: 17
+  doorbell_identity_eiid: 2
+
+  # doorbell_identity_provider_piid
+  #   身份识别事件 arguments 中表示访客身份的 piid。
+  #   当前定义：0未知，1美团，2饿了么，3京东，4顺丰，5淘宝闪购。
+  doorbell_identity_provider_piid: 31
+
+  # doorbell_identity_trigger_values
+  #   允许主动触发司阍会话的身份 value。默认只允许明确身份，忽略 0 未知。
+  doorbell_identity_trigger_values: [1, 2, 3, 4, 5]
+
+  # doorbell_identity_cooldown_seconds
+  #   同一门锁同一身份主动触发后的冷却时间（秒），避免靠近/播放/重连等重复事件循环。
+  #   <=0 表示关闭冷却。
+  doorbell_identity_cooldown_seconds: 120.0
+
   # doorbell_session_key
   #   门铃事件要投递到的 OpenClaw sessionKey。门锁/门铃访客对话应投递给
   #   司阍(doorman)子 Agent，例如：

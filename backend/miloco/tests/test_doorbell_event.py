@@ -39,6 +39,7 @@ def _bare_proxy() -> MiotProxy:
     proxy._doorbell_subscription_retry_task = None
     proxy._lock_camera_tasks = {}
     proxy._lock_camera_hold_deadlines = {}
+    proxy._doorbell_identity_last_triggered = {}
     proxy._device_info_dict = {
         "door-did": SimpleNamespace(name="智能门锁", room_name="玄关")
     }
@@ -196,6 +197,98 @@ async def test_someone_at_door_event_does_not_start_conversation(monkeypatch):
 
     run_turn.assert_not_awaited()
     proxy._doorbell_listener.on_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_identity_event_starts_proactive_doorman_conversation(monkeypatch):
+    proxy = _bare_proxy()
+    proxy._doorbell_listener = SimpleNamespace(on_event=AsyncMock())
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_IDENTITY_TRIGGER_ENABLED", "true")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:doorman:doorbell")
+    monkeypatch.setenv(
+        "MILOCO_MIOT__DOORBELL_REPLY_AUDIO_COMMAND",
+        '["/bin/echo", "{text}"]',
+    )
+    reset_settings()
+    run_turn = AsyncMock(return_value=("run-1", "ok", 123.0, "请说"))
+    monkeypatch.setattr(conversation_module, "run_agent_turn_detailed", run_turn)
+
+    await proxy._on_device_event(
+        MIoTDeviceEvent(
+            did="door-did",
+            siid=17,
+            eiid=2,
+            raw={
+                "method": "event_occured",
+                "params": {
+                    "did": "door-did",
+                    "siid": 17,
+                    "eiid": 2,
+                    "arguments": [
+                        {"piid": 8, "value": 1785651884},
+                        {"piid": 31, "value": 3},
+                    ],
+                },
+            },
+        )
+    )
+
+    run_turn.assert_awaited_once()
+    message = run_turn.await_args.args[0]
+    assert "门锁识别到门外访客身份：京东快递员" in message
+    assert "访客未按门铃" in message
+    assert "您好，请问有什么需要帮忙的" in message
+    assert run_turn.await_args.kwargs["session_key"] == "agent:doorman:doorbell"
+    proxy._doorbell_listener.on_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_identity_event_ignores_unknown_provider(monkeypatch):
+    proxy = _bare_proxy()
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_IDENTITY_TRIGGER_ENABLED", "true")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:doorman:doorbell")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_REPLY_AUDIO_COMMAND", '["/bin/echo", "{text}"]')
+    reset_settings()
+    run_turn = AsyncMock(return_value=("run-1", "ok", 123.0, "请说"))
+    monkeypatch.setattr(conversation_module, "run_agent_turn_detailed", run_turn)
+
+    await proxy._on_device_event(
+        MIoTDeviceEvent(
+            did="door-did",
+            siid=17,
+            eiid=2,
+            raw={"params": {"arguments": [{"piid": 31, "value": 0}]}},
+        )
+    )
+
+    run_turn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_identity_event_deduplicates_with_cooldown(monkeypatch):
+    proxy = _bare_proxy()
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_IDENTITY_TRIGGER_ENABLED", "true")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_IDENTITY_COOLDOWN_SECONDS", "120")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_SESSION_KEY", "agent:doorman:doorbell")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_REPLY_AUDIO_COMMAND", '["/bin/echo", "{text}"]')
+    reset_settings()
+    now = 100.0
+    monkeypatch.setattr(client_module.time, "monotonic", lambda: now)
+    run_turn = AsyncMock(return_value=("run-1", "ok", 123.0, "请说"))
+    monkeypatch.setattr(conversation_module, "run_agent_turn_detailed", run_turn)
+    event = MIoTDeviceEvent(
+        did="door-did",
+        siid=17,
+        eiid=2,
+        raw={"params": {"arguments": [{"piid": 31, "value": 4}]}},
+    )
+
+    await proxy._on_device_event(event)
+    conversation_module.get_doorbell_conversation_service()._active.clear()
+    now = 150.0
+    await proxy._on_device_event(event)
+
+    run_turn.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -475,6 +475,114 @@ async def test_conversation_end_pushes_summary_to_main_and_phone(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_package_delivery_exception_summary_requests_owner_action(monkeypatch):
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_OWNER_SUMMARY_ENABLED", "true")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_OWNER_SUMMARY_MAIN_SESSION_KEY", "agent:main:main")
+    reset_settings()
+    now = 100.0
+    service = DoorbellConversationService(clock=lambda: now, schedule_timeouts=False)
+    run_turn = AsyncMock(
+        side_effect=[
+            ("door-run-1", "ok", 100.0, "您好，请问您是哪位？"),
+            ("door-run-2", "ok", 100.0, "您好，我不能代签。请说明快递公司和单号，我会记录给主人。"),
+            ("main-run", "ok", 100.0, None),
+        ]
+    )
+    send_notify = AsyncMock()
+    monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
+    monkeypatch.setattr(
+        "miloco.doorbell.conversation._miot_service",
+        lambda: MagicMock(send_notify=send_notify),
+    )
+
+    conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
+    service.on_reply_audio_result(conversation_id, success=True)
+    assert await service.accept_speech(_speech("我是顺丰快递，有贵重件需要签收。")) is True
+    service.on_reply_audio_result(conversation_id, success=True)
+    now = 116.0
+
+    assert await service.expire_listening_windows() == 1
+    summary = run_turn.await_args_list[2].args[0]
+    assert "需要主人处理：是" in summary
+    assert "快递异常" in summary
+    assert "通过 Miloco 发送家庭场景手机通知" in summary
+    send_notify.assert_awaited_once()
+    assert "门口快递异常" in send_notify.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_food_delivery_exception_summary_requests_speaker_and_push(monkeypatch):
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_OWNER_SUMMARY_ENABLED", "true")
+    monkeypatch.setenv("MILOCO_MIOT__DOORBELL_OWNER_SUMMARY_MAIN_SESSION_KEY", "agent:main:main")
+    reset_settings()
+    now = 100.0
+    service = DoorbellConversationService(clock=lambda: now, schedule_timeouts=False)
+    run_turn = AsyncMock(
+        side_effect=[
+            ("door-run-1", "ok", 100.0, "您好，请问您是哪位？"),
+            ("door-run-2", "ok", 100.0, "您好，请您先稍等一下，我马上给主人留言确认。"),
+            ("main-run", "ok", 100.0, None),
+        ]
+    )
+    send_notify = AsyncMock()
+    monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
+    monkeypatch.setattr(
+        "miloco.doorbell.conversation._miot_service",
+        lambda: MagicMock(send_notify=send_notify),
+    )
+
+    conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
+    service.on_reply_audio_result(conversation_id, success=True)
+    assert await service.accept_speech(_speech("我是外卖员，外卖破了。")) is True
+    service.on_reply_audio_result(conversation_id, success=True)
+    await asyncio.sleep(0)
+
+    assert service.is_listening(conversation_id) is False
+    submitted_text = run_turn.await_args_list[1].args[0]
+    assert "本轮必须只对门外访客播报这句话" in submitted_text
+    assert "请您先稍等一下" in submitted_text
+    assert "不要向外卖员道歉" in submitted_text
+    assert "不要追问订单信息" in submitted_text
+    summary = run_turn.await_args_list[2].args[0]
+    assert "需要主人处理：是" in summary
+    assert "外卖异常" in summary
+    assert "音箱直接播报一次" in summary
+    assert "不要临时创建自动化" in summary
+    assert "通过 Miloco 发送家庭场景手机通知" in summary
+    send_notify.assert_awaited_once()
+    assert "门口外卖异常" in send_notify.await_args.args[0]
+    assert "外卖破了" in send_notify.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_food_delivery_context_treats_generic_problem_as_exception(monkeypatch):
+    reset_settings()
+    now = 100.0
+    service = DoorbellConversationService(clock=lambda: now, schedule_timeouts=False)
+    run_turn = AsyncMock(
+        side_effect=[
+            ("run-1", "ok", 100.0, "您好，请问您是哪位？"),
+            ("run-2", "ok", 100.0, "您好，外卖请挂在门把手上，谢谢。"),
+            ("run-3", "ok", 100.0, "您好，请您先稍等一下，我马上给主人留言确认。"),
+        ]
+    )
+    monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
+
+    conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
+    service.on_reply_audio_result(conversation_id, success=True)
+    assert await service.accept_speech(_speech("我是外卖员")) is True
+    first_food_text = run_turn.await_args_list[1].args[0]
+    assert "门房系统已识别到外卖异常" not in first_food_text
+    service.on_reply_audio_result(conversation_id, success=True)
+    assert await service.accept_speech(_speech("这个餐有点问题")) is True
+
+    problem_text = run_turn.await_args_list[2].args[0]
+    assert "门房系统已识别到外卖异常" in problem_text
+    assert "请您先稍等一下" in problem_text
+    assert "不要追问订单信息" in problem_text
+
+
+@pytest.mark.asyncio
 async def test_agent_prompt_includes_current_conversation_state(monkeypatch):
     reset_settings()
     now = 100.0

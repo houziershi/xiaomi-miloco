@@ -28,6 +28,7 @@ def _settings(tmp_path, monkeypatch):
         "MILOCO_MIOT__DOORBELL_SILENCE_FALLBACK_TEXT",
         "我没有听到您的声音，请稍后再按门铃。",
     )
+    monkeypatch.setattr("miloco.doorbell.conversation.reset_agent_sessions", AsyncMock())
     reset_settings()
     yield
     reset_settings()
@@ -551,7 +552,9 @@ async def test_closing_reply_ends_conversation(monkeypatch):
             ("run-2", "ok", 100.0, "不客气，慢走。"),
         ]
     )
+    reset_sessions = AsyncMock()
     monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
+    monkeypatch.setattr("miloco.doorbell.conversation.reset_agent_sessions", reset_sessions)
 
     conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
     service.on_reply_audio_result(conversation_id, success=True)
@@ -561,6 +564,12 @@ async def test_closing_reply_ends_conversation(monkeypatch):
     assert service.is_listening(conversation_id) is False
     assert await service.accept_speech(_speech("完整")) is False
     assert run_turn.await_count == 2
+    await asyncio.sleep(0)
+    reset_sessions.assert_awaited_once_with(
+        [("agent:doorman:doorbell", "miloco-interactive")],
+        delete_transcript=True,
+        timeout=10.0,
+    )
 
 
 @pytest.mark.asyncio
@@ -579,7 +588,9 @@ async def test_closing_reply_ends_when_audio_callback_arrives_before_response(mo
         return "run-1", "ok", 100.0, "您好，请问您是哪位？"
 
     run_turn = AsyncMock(side_effect=run_turn_side_effect)
+    reset_sessions = AsyncMock()
     monkeypatch.setattr("miloco.doorbell.conversation.run_agent_turn_detailed", run_turn)
+    monkeypatch.setattr("miloco.doorbell.conversation.reset_agent_sessions", reset_sessions)
 
     conversation_id = await service.start(did="door-did", siid=7, eiid=1006, text="门铃被按下")
     service.on_reply_audio_result(conversation_id, success=True)
@@ -588,3 +599,9 @@ async def test_closing_reply_ends_when_audio_callback_arrives_before_response(mo
     assert service.is_listening(conversation_id) is False
     assert await service.accept_speech(_speech("不应继续接收")) is False
     assert run_turn.await_count == 2
+    await asyncio.sleep(0)
+    reset_sessions.assert_awaited_once_with(
+        [("agent:doorman:doorbell", "miloco-interactive")],
+        delete_transcript=True,
+        timeout=10.0,
+    )

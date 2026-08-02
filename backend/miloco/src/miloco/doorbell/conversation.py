@@ -19,7 +19,11 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 from miloco.config import get_settings
 from miloco.doorbell.debug_audio import doorbell_debug_audio_recorder
-from miloco.utils.agent_client import call_agent_webhook, run_agent_turn_detailed
+from miloco.utils.agent_client import (
+    call_agent_webhook,
+    reset_agent_sessions,
+    run_agent_turn_detailed,
+)
 from miloco.utils.paths import miloco_home
 
 if TYPE_CHECKING:
@@ -315,6 +319,7 @@ class DoorbellConversationService:
             conversation.state = "ended"
             self._active.pop(conversation_id, None)
             self._schedule_owner_summary(conversation, reason="playback_failed")
+            self._schedule_doorman_session_reset(conversation, reason="playback_failed")
             logger.warning(
                 "doorbell conversation ended after playback failure id=%s did=%s error=%s",
                 conversation_id,
@@ -329,6 +334,7 @@ class DoorbellConversationService:
             conversation.state = "ended"
             self._active.pop(conversation_id, None)
             self._schedule_owner_summary(conversation, reason="max_turns")
+            self._schedule_doorman_session_reset(conversation, reason="max_turns")
             logger.info(
                 "doorbell conversation ended after max turns id=%s did=%s turns=%s",
                 conversation_id,
@@ -505,6 +511,7 @@ class DoorbellConversationService:
                 self._active.pop(conversation.conversation_id, None)
                 self._stop_debug_audio_recording(conversation, reason="listen_expired")
                 self._schedule_owner_summary(conversation, reason="listen_expired")
+                self._schedule_doorman_session_reset(conversation, reason="listen_expired")
                 continue
             if conversation.speech_source_dids & source_dids:
                 return conversation
@@ -591,6 +598,7 @@ class DoorbellConversationService:
         conversation.state = "ended"
         conversation.listen_generation += 1
         await self._push_owner_summary(conversation, reason="silence_timeout")
+        await self._reset_doorman_session(conversation, reason="silence_timeout")
         logger.info(
             "doorbell conversation silence timeout id=%s did=%s turns=%s seen_speeches=%s",
             conversation.conversation_id,
@@ -683,6 +691,7 @@ class DoorbellConversationService:
         conversation.state = "ended"
         self._active.pop(conversation.conversation_id, None)
         self._schedule_owner_summary(conversation, reason="reply_closed")
+        self._schedule_doorman_session_reset(conversation, reason="reply_closed")
         logger.info(
             "doorbell conversation ended after closing reply id=%s did=%s turns=%s source=%s reply=%s",
             conversation.conversation_id,
@@ -692,6 +701,42 @@ class DoorbellConversationService:
             conversation.assistant_messages[-1] if conversation.assistant_messages else "",
         )
         return True
+
+    def _schedule_doorman_session_reset(self, conversation: _Conversation, *, reason: str) -> None:
+        try:
+            asyncio.create_task(self._reset_doorman_session(conversation, reason=reason))
+        except RuntimeError:
+            logger.debug(
+                "doorbell doorman session reset not scheduled outside running loop id=%s reason=%s",
+                conversation.conversation_id,
+                reason,
+            )
+
+    async def _reset_doorman_session(self, conversation: _Conversation, *, reason: str) -> None:
+        session_key = (get_settings().miot.doorbell_session_key or "").strip()
+        if not session_key:
+            return
+        try:
+            await reset_agent_sessions(
+                [(session_key, "miloco-interactive")],
+                delete_transcript=True,
+                timeout=10.0,
+            )
+        except Exception as e:
+            logger.warning(
+                "doorbell doorman session reset failed id=%s session_key=%s reason=%s error=%s",
+                conversation.conversation_id,
+                session_key,
+                reason,
+                e,
+            )
+            return
+        logger.info(
+            "doorbell doorman session reset id=%s session_key=%s reason=%s",
+            conversation.conversation_id,
+            session_key,
+            reason,
+        )
 
     @staticmethod
     def _conversation_summary(conversation: _Conversation | None) -> dict[str, object] | None:

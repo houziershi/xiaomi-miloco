@@ -259,7 +259,11 @@ class MiotSettings(BaseModel):
     )
     doorbell_wake_action_iid: str | None = Field(
         default="action.17.3",
-        description="OpenClaw 播放门锁回复音频前用于唤醒门锁的 action iid；为空时 OpenClaw 侧回退默认 action.17.3。",
+        description="门锁回复音频播放前可选唤醒门锁的 action iid；仅在 doorbell_wake_before_reply_audio_enabled=true 时执行。",
+    )
+    doorbell_wake_before_reply_audio_enabled: bool = Field(
+        default=False,
+        description="播放门锁回复音频前是否先执行 doorbell_wake_action_iid 唤醒门锁；默认关闭，适用于无需显式唤醒即可播放音频的门锁。",
     )
     doorbell_reply_audio_command: list[str] | None = Field(
         default=None,
@@ -312,6 +316,18 @@ class MiotSettings(BaseModel):
     doorbell_debug_audio_dir: str = Field(
         default="",
         description="门铃调试音频保存目录；为空时默认写入 $MILOCO_HOME/debug/doorbell-audio。",
+    )
+    doorbell_owner_summary_enabled: bool = Field(
+        default=False,
+        description="门铃会话结束后，是否把司阍门口摘要同步给主 Agent。",
+    )
+    doorbell_owner_summary_main_session_key: str = Field(
+        default="agent:main:main",
+        description="接收司阍门口摘要的主 Agent sessionKey。",
+    )
+    doorbell_owner_summary_phone_push_enabled: bool = Field(
+        default=False,
+        description="门铃会话结束后，是否把同一份司阍门口摘要推送到主人手机通知频道。",
     )
 
 

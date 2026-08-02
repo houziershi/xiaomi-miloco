@@ -1041,6 +1041,7 @@ class MiotProxy:
                         "did": msg.did,
                         "siid": msg.siid,
                         "eiid": msg.eiid,
+                        "wakeBeforeAudio": settings.doorbell_wake_before_reply_audio_enabled,
                         "wakeActionIid": settings.doorbell_wake_action_iid,
                         "audioCommand": settings.doorbell_reply_audio_command,
                     }

@@ -23,6 +23,7 @@ interface DoorbellReplyAudioRequest {
   did: string;
   siid?: number;
   eiid?: number;
+  wakeBeforeAudio?: boolean;
   wakeActionIid?: string;
   audioCommand?: string[];
 }
@@ -46,7 +47,7 @@ interface IRequestBody {
   // habit-suggest 等高频低负载场景）。owner-channel 模式强制忽略此字段（延续
   // 完整上下文）。
   lightContext?: boolean;
-  // 门锁门铃专用：OpenClaw 回复后，在 OpenClaw 侧先唤醒门锁，再播放回复音频。
+  // 门锁门铃专用：OpenClaw 回复后，在 OpenClaw 侧按配置可选唤醒门锁，再播放回复音频。
   doorbellReplyAudio?: DoorbellReplyAudioRequest;
 }
 
@@ -113,31 +114,38 @@ async function runDoorbellReplyAudio(
   const totalStartedAt = Date.now();
   const text = responseText?.trim();
   if (!request || !request.did || !text) return false;
+  const wakeBeforeAudio = request.wakeBeforeAudio === true;
   const wakeActionIid = request.wakeActionIid?.trim() || "action.17.3";
   const audioCommand = request.audioCommand?.filter((part) => part.trim());
   if (!audioCommand?.length) return false;
 
   logger.info(
-    `[doorbell-reply-audio] start conversation=${request.conversationId ?? ""} did=${request.did} textChars=${text.length} wakeAction=${wakeActionIid}`,
+    `[doorbell-reply-audio] start conversation=${request.conversationId ?? ""} did=${request.did} textChars=${text.length} wakeBeforeAudio=${wakeBeforeAudio} wakeAction=${wakeActionIid}`,
   );
 
-  const wakeStartedAt = Date.now();
-  const wake = await runShell("miloco-cli", [
-    "device",
-    "action",
-    request.did,
-    wakeActionIid,
-  ]);
-  logger.info(
-    `[doorbell-reply-audio] wake finished conversation=${request.conversationId ?? ""} did=${request.did} iid=${wakeActionIid} status=${wake.status} durationMs=${elapsedMs(wakeStartedAt)}`,
-  );
-  if (wake.status !== 0 || wake.error) {
-    const error = `wake failed: ${wake.error?.message ?? wake.stderr}`;
-    logger.error(
-      `[doorbell-reply-audio] wake failed did=${request.did} iid=${wakeActionIid} status=${wake.status} error=${wake.error?.message ?? wake.stderr}`,
+  if (wakeBeforeAudio) {
+    const wakeStartedAt = Date.now();
+    const wake = await runShell("miloco-cli", [
+      "device",
+      "action",
+      request.did,
+      wakeActionIid,
+    ]);
+    logger.info(
+      `[doorbell-reply-audio] wake finished conversation=${request.conversationId ?? ""} did=${request.did} iid=${wakeActionIid} status=${wake.status} durationMs=${elapsedMs(wakeStartedAt)}`,
     );
-    await reportDoorbellReplyAudioResult(api, request, false, error);
-    return false;
+    if (wake.status !== 0 || wake.error) {
+      const error = `wake failed: ${wake.error?.message ?? wake.stderr}`;
+      logger.error(
+        `[doorbell-reply-audio] wake failed did=${request.did} iid=${wakeActionIid} status=${wake.status} error=${wake.error?.message ?? wake.stderr}`,
+      );
+      await reportDoorbellReplyAudioResult(api, request, false, error);
+      return false;
+    }
+  } else {
+    logger.info(
+      `[doorbell-reply-audio] wake skipped conversation=${request.conversationId ?? ""} did=${request.did}`,
+    );
   }
 
   const values = {

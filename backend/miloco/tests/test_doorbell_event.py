@@ -173,6 +173,7 @@ async def test_doorbell_event_requests_openclaw_reply_audio(monkeypatch):
         "did": "door-did",
         "siid": 7,
         "eiid": 1006,
+        "wakeBeforeAudio": False,
         "wakeActionIid": "action.17.3",
         "audioCommand": ["/bin/echo", "{did}", "{text}"],
     }

@@ -40,17 +40,25 @@ miot:
   doorbell_session_key: null
 
   # doorbell_wake_action_iid
-  #   OpenClaw 回复完成后、发送门锁音频前调用的门锁唤醒 action。
+  #   OpenClaw 回复完成后、发送门锁音频前可选调用的门锁唤醒 action。
   #   格式固定为 action.{siid}.{aiid}，会通过 MIoT action 调用执行，参数为空列表 []。
   #   当前已验证唤醒命令等价于：
   #     miloco-cli device action <did> action.17.3
-  #   为空（null 或 ""）时 OpenClaw 侧回退默认 action.17.3。当前链路要求播放音频前先唤醒。
+  #   仅在 doorbell_wake_before_reply_audio_enabled=true 时执行；为空（null 或 ""）时
+  #   OpenClaw 侧回退默认 action.17.3。
   doorbell_wake_action_iid: action.17.3
+
+  # doorbell_wake_before_reply_audio_enabled
+  #   播放门锁回复音频前是否先执行 doorbell_wake_action_iid 唤醒门锁。
+  #   默认 false：当前验证门锁不需要显式唤醒即可播放，避免额外 action 诱发门锁事件。
+  #   只有确认某款门锁必须先唤醒才能播放音频时再改成 true。
+  doorbell_wake_before_reply_audio_enabled: false
 
   # doorbell_reply_audio_command
   #   播放 OpenClaw 回复文本的外部命令参数列表。Miloco 只把该请求随 webhook 交给
   #   OpenClaw 插件；真正的 TTS、ffmpeg 转码、audio_sender 发送都在 OpenClaw 侧执行。
-  #   OpenClaw 插件会先执行 doorbell_wake_action_iid 唤醒门锁，再执行该音频命令。
+  #   如果 doorbell_wake_before_reply_audio_enabled=true，OpenClaw 插件会先执行
+  #   doorbell_wake_action_iid 唤醒门锁，再执行该音频命令；默认直接执行音频命令。
   #   为空（null）时不请求 OpenClaw 播放音频；适合先只验证“收到事件并生成回复”。
   #   支持占位符：
   #     {text}  OpenClaw 回复文本
@@ -103,8 +111,9 @@ miot:
 
   # doorbell_silence_fallback_enabled
   #   访客监听窗口内无人说话时，是否直接播放固定兜底语音并结束本次门铃会话。
-  #   该兜底不再调用 OpenClaw 生成回复，不消耗模型；仍通过 OpenClaw 插件先唤醒门锁，
-  #   再执行 doorbell_reply_audio_command 播放下面的固定文案。
+  #   该兜底不再调用 OpenClaw 生成回复，不消耗模型；仍通过 OpenClaw 插件执行
+  #   doorbell_reply_audio_command 播放下面的固定文案；是否先唤醒门锁由
+  #   doorbell_wake_before_reply_audio_enabled 控制。
   doorbell_silence_fallback_enabled: true
 
   # doorbell_silence_fallback_text
@@ -120,3 +129,15 @@ miot:
   # doorbell_debug_audio_dir
   #   调试音频保存目录；为空时默认写入 $MILOCO_HOME/debug/doorbell-audio。
   doorbell_debug_audio_dir: ""
+
+  # doorbell_owner_summary_enabled
+  #   门铃会话结束后，把司阍门口摘要同步给主 Agent。
+  doorbell_owner_summary_enabled: false
+
+  # doorbell_owner_summary_main_session_key
+  #   接收司阍门口摘要的主 Agent sessionKey。
+  doorbell_owner_summary_main_session_key: agent:main:main
+
+  # doorbell_owner_summary_phone_push_enabled
+  #   门铃会话结束后，把同一份摘要推送到主人手机通知频道。
+  doorbell_owner_summary_phone_push_enabled: false

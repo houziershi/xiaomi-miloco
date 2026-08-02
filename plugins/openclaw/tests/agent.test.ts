@@ -108,7 +108,7 @@ afterEach(() => {
 });
 
 describe("kAgentWebhook 上下文溢出自愈", () => {
-  it("doorbell_reply_audio：不跑 agent，直接唤醒并播放固定文本", async () => {
+  it("doorbell_reply_audio：默认不唤醒，直接播放固定文本", async () => {
     const { api, run } = makeApi({});
 
     const res = (await kDoorbellReplyAudioWebhook.action({
@@ -125,21 +125,15 @@ describe("kAgentWebhook 上下文溢出自愈", () => {
 
     expect(res.played).toBe(true);
     expect(run).not.toHaveBeenCalled();
-    expect(runShellMock).toHaveBeenCalledTimes(2);
-    expect(runShellMock).toHaveBeenNthCalledWith(1, "miloco-cli", [
-      "device",
-      "action",
-      "1179479632",
-      "action.17.3",
-    ]);
-    expect(runShellMock).toHaveBeenNthCalledWith(2, "/tmp/play-doorlock-audio", [
+    expect(runShellMock).toHaveBeenCalledTimes(1);
+    expect(runShellMock).toHaveBeenNthCalledWith(1, "/tmp/play-doorlock-audio", [
       "我没有听到您的声音，请稍后再按门铃。",
       "1179479632",
     ]);
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("doorbellReplyAudio：OpenClaw 回复后先唤醒门锁，再播放回复音频", async () => {
+  it("doorbellReplyAudio：开启唤醒时先唤醒门锁，再播放回复音频", async () => {
     peekTurnMetaMock.mockImplementation(() => ({
       success: true,
       errorMsg: null,
@@ -160,6 +154,7 @@ describe("kAgentWebhook 上下文溢出自愈", () => {
           did: "1179479632",
           siid: 7,
           eiid: 1006,
+          wakeBeforeAudio: true,
           wakeActionIid: "action.17.3",
           audioCommand: [
             "/tmp/play-doorlock-audio",
@@ -204,9 +199,13 @@ describe("kAgentWebhook 上下文溢出自愈", () => {
       errorMsg: null,
       responseText: "请稍等。",
     }));
-    runShellMock
-      .mockResolvedValueOnce({ status: 0, stdout: "", stderr: "", signal: null, error: null })
-      .mockResolvedValueOnce({ status: 1, stdout: "", stderr: "boom", signal: null, error: null });
+    runShellMock.mockResolvedValueOnce({
+      status: 1,
+      stdout: "",
+      stderr: "boom",
+      signal: null,
+      error: null,
+    });
     const { api } = makeApi({ waitByRunId: { t1: { status: "ok" } } });
 
     await kAgentWebhook.action({
